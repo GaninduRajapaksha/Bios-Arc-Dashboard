@@ -1,0 +1,48 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --arc-bg:       #F8FAFC;
+  --arc-surface:  #FFFFFF;
+  --arc-panel:    #F1F5F9;
+  --arc-border:   #E2E8F0;
+  --arc-sidebar:  #16202C;
+  --arc-accent:   #2D6A4F;
+  --arc-accent2:  #2563EB;
+  --arc-muted:    #64748B;
+  --arc-text:     #0F172A;
+  --arc-textDim:  #475569;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  background-color: var(--arc-bg);
+  color: var(--arc-text);
+  font-family: "Plus Jakarta Sans", system-ui, sans-serif;
+}
+
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---- Scrollbar ---- */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #CBD5E1; border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: #94A3B8; }
+
+.sidebar-scroll::-webkit-scrollbar-thumb { background: #2D3E50; }
+.sidebar-scroll::-webkit-scrollbar-thumb:hover { background: #475569; }
+
+/* ---- Selection ---- */
+::selection { background: rgba(45, 106, 79, 0.16); color: #0F172A; }
+
+/* ---- Chart container reset ---- */
+.tv-chart-container {
+  position: relative;
+  width: 100%;
+}
