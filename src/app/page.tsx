@@ -10,6 +10,8 @@ import type { FocusedChartWindow } from "@/components/charts/ImpedanceChart";
 import {
   type BiosarcWorkspaceState,
   generateSampleCsvDownload,
+  hasSavedWorkspace,
+  hydrateDefaultNodeFromAttachedCsv,
   loadWorkspace,
   resetWorkspace,
   saveWorkspace,
@@ -22,7 +24,7 @@ import {
   type IdentifiedPattern,
   type SimilarityMatch,
 } from "@/lib/patternEngine";
-import type { CsvTelemetryPoint } from "@/lib/csvParser";
+import type { CsvTelemetryPoint, ImpedanceUnit } from "@/lib/csvParser";
 
 const ImpedanceChart = dynamic(
   () => import("@/components/charts/ImpedanceChart"),
@@ -37,20 +39,27 @@ export default function HomePage() {
   const [workspace, setWorkspace] = useState<BiosarcWorkspaceState | null>(null);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 
-  // Modals
   const [treeModalOpen, setTreeModalOpen] = useState(false);
   const [editingTree, setEditingTree] = useState<TreeGroup | null>(null);
   const [nodeModalOpen, setNodeModalOpen] = useState(false);
   const [editingNode, setEditingNode] = useState<SensorNode | null>(null);
   const [defaultNodeTreeId, setDefaultNodeTreeId] = useState("");
 
-  // Chart focus & cross-dataset similarity state
   const [focusedWindow, setFocusedWindow] = useState<FocusedChartWindow | null>(null);
   const [similaritySource, setSimilaritySource] = useState<IdentifiedPattern | null>(null);
   const [minSimilarity, setMinSimilarity] = useState(65);
 
   useEffect(() => {
-    setWorkspace(loadWorkspace());
+    const hadSaved = hasSavedWorkspace();
+    const initial = loadWorkspace();
+    setWorkspace(initial);
+
+    // On first visit, hydrate the default node directly from the attached CSV file
+    if (!hadSaved) {
+      void hydrateDefaultNodeFromAttachedCsv(initial).then((hydrated) => {
+        setWorkspace(hydrated);
+      });
+    }
   }, []);
 
   const updateWorkspace = (
@@ -85,7 +94,6 @@ export default function HomePage() {
       .sort((a, b) => a.startTs - b.startTs);
   }, [workspace, activeNode]);
 
-  // Compute cross-dataset similarity matches dynamically whenever requested
   const similarityMatches = useMemo(() => {
     if (!workspace || !similaritySource) return [];
     const sourceNode = workspace.nodes.find(
@@ -101,6 +109,7 @@ export default function HomePage() {
         nodeName: n.name,
         treeId: n.treeId,
         treeName: treeMap.get(n.treeId) ?? "Tree",
+        unit: n.unit ?? "kΩ",
         points: n.points,
       }));
 
@@ -112,7 +121,6 @@ export default function HomePage() {
     );
   }, [workspace, similaritySource, minSimilarity]);
 
-  // ── Tree CRUD ──
   const handleToggleTree = (treeId: string) => {
     updateWorkspace((prev) => ({
       ...prev,
@@ -181,7 +189,6 @@ export default function HomePage() {
     setSimilaritySource(null);
   };
 
-  // ── Node CRUD & CSV Ingestion ──
   const handleSaveNode = (payload: {
     id?: string;
     treeId: string;
@@ -190,6 +197,7 @@ export default function HomePage() {
     firmware: string;
     csvFileName?: string;
     intervalLabel?: string;
+    unit?: ImpedanceUnit;
     points?: CsvTelemetryPoint[];
   }) => {
     const nowIso = new Date().toISOString();
@@ -205,6 +213,7 @@ export default function HomePage() {
             firmware: payload.firmware,
             csvFileName: payload.csvFileName ?? n.csvFileName,
             intervalLabel: payload.intervalLabel ?? n.intervalLabel,
+            unit: payload.unit ?? n.unit ?? "kΩ",
             points: payload.points ?? n.points,
             updatedAt: nowIso,
           };
@@ -212,11 +221,15 @@ export default function HomePage() {
 
         let updatedPatterns = prev.patterns;
         if (payload.points) {
-          // Preserve manual patterns on CSV replace? Replace auto patterns with fresh detections
+          const targetUnit = payload.unit ?? "kΩ";
           const manualForNode = prev.patterns.filter(
             (p) => p.nodeId === payload.id && p.source === "manual"
           );
-          const autoDetected = detectPatternsForNode(payload.id, payload.points);
+          const autoDetected = detectPatternsForNode(
+            payload.id,
+            payload.points,
+            targetUnit
+          );
           updatedPatterns = [
             ...prev.patterns.filter((p) => p.nodeId !== payload.id),
             ...autoDetected,
@@ -237,6 +250,7 @@ export default function HomePage() {
 
       const newId = makeId("node");
       const newPoints = payload.points ?? [];
+      const newUnit = payload.unit ?? "kΩ";
       const newNode: SensorNode = {
         id: newId,
         treeId: payload.treeId,
@@ -244,12 +258,16 @@ export default function HomePage() {
         location: payload.location,
         firmware: payload.firmware,
         csvFileName: payload.csvFileName ?? "",
-        intervalLabel: payload.intervalLabel ?? (newPoints.length > 0 ? "2h interval" : "No data"),
+        intervalLabel:
+          payload.intervalLabel ?? (newPoints.length > 0 ? "2s interval" : "No data"),
+        unit: newUnit,
         points: newPoints,
         updatedAt: nowIso,
       };
       const autoDetected =
-        newPoints.length >= 12 ? detectPatternsForNode(newId, newPoints) : [];
+        newPoints.length >= 10
+          ? detectPatternsForNode(newId, newPoints, newUnit)
+          : [];
 
       return {
         ...prev,
@@ -285,7 +303,6 @@ export default function HomePage() {
     setFocusedWindow(null);
   };
 
-  // ── Pattern Actions ──
   const handleSaveManualPattern = (pattern: IdentifiedPattern) => {
     updateWorkspace((prev) => ({
       ...prev,
@@ -300,7 +317,11 @@ export default function HomePage() {
 
   const handleAutoScanPatterns = () => {
     if (!activeNode) return;
-    const freshlyDetected = detectPatternsForNode(activeNode.id, activeNode.points);
+    const freshlyDetected = detectPatternsForNode(
+      activeNode.id,
+      activeNode.points,
+      activeNode.unit ?? "kΩ"
+    );
     updateWorkspace((prev) => {
       const manualExisting = prev.patterns.filter(
         (p) => p.nodeId === activeNode.id && p.source === "manual"
@@ -359,7 +380,7 @@ export default function HomePage() {
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = "biosarc_sample_2h_telemetry.csv";
+    a.download = "biosarc_logger_sample.csv";
     a.click();
     URL.revokeObjectURL(url);
   };
@@ -369,6 +390,9 @@ export default function HomePage() {
     setWorkspace(fresh);
     setFocusedWindow(null);
     setSimilaritySource(null);
+    void hydrateDefaultNodeFromAttachedCsv(fresh).then((hydrated) => {
+      setWorkspace(hydrated);
+    });
   };
 
   if (!workspace) {
@@ -379,6 +403,7 @@ export default function HomePage() {
     );
   }
 
+  const activeUnit: ImpedanceUnit = activeNode?.unit ?? "kΩ";
   const latestActivePoint =
     activeNode && activeNode.points.length > 0
       ? activeNode.points[activeNode.points.length - 1]
@@ -389,7 +414,6 @@ export default function HomePage() {
 
   return (
     <div className="flex h-screen overflow-hidden bg-arc-bg">
-      {/* Dark Navy-Green Expandable Tree & Node Sidebar */}
       <TreeSidebar
         trees={workspace.trees}
         nodes={workspace.nodes}
@@ -425,9 +449,7 @@ export default function HomePage() {
         onResetSampleData={handleResetSampleData}
       />
 
-      {/* Main Light Workspace */}
       <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
-        {/* Top Bar (3-zone contract) */}
         <header className="h-14 flex-shrink-0 bg-white border-b border-slate-200 px-5 flex items-center justify-between gap-8">
           <div className="flex items-center gap-3 min-w-0">
             <button
@@ -439,7 +461,7 @@ export default function HomePage() {
               <Menu className="w-4 h-4" />
             </button>
             <span className="text-sm font-bold text-slate-900 whitespace-nowrap shrink-0">
-              Impedance &amp; Pattern Workspace
+              Time · RAW ADC · DC V · Impedance
             </span>
           </div>
 
@@ -474,50 +496,53 @@ export default function HomePage() {
           </div>
         </header>
 
-        {/* Scrollable Content Stage */}
         <main className="flex-1 overflow-y-auto p-5 space-y-4">
-          {/* 4-Card KPI Summary Row */}
+          {/* 4-Card Telemetry Summary Strip matching Time | RAW ADC | DC V | Impedance */}
           <div className="grid grid-cols-2 xl:grid-cols-4 gap-3.5">
             <div className="bg-white rounded-xl border border-slate-200 px-4 py-3.5">
-              <div className="text-xs font-medium text-slate-500">Monitored Trees</div>
-              <div className="mt-1 flex items-baseline gap-2">
-                <span className="text-2xl font-mono font-bold text-slate-900 tabular-nums">
-                  {workspace.trees.length}
-                </span>
-                <span className="text-xs font-mono text-slate-500 tabular-nums">
-                  across {workspace.nodes.length} nodes
-                </span>
-              </div>
-            </div>
-
-            <div className="bg-white rounded-xl border border-slate-200 px-4 py-3.5">
-              <div className="text-xs font-medium text-slate-500">Active Node CSV</div>
-              <div className="mt-1 flex items-baseline gap-2">
-                <span className="text-2xl font-mono font-bold text-slate-900 tabular-nums">
-                  {activeNode ? activeNode.points.length.toLocaleString() : "0"}
-                </span>
-                <span className="text-xs font-mono text-slate-500 truncate">
-                  {activeNode ? activeNode.intervalLabel : "No node selected"}
-                </span>
-              </div>
-            </div>
-
-            <div className="bg-white rounded-xl border border-slate-200 px-4 py-3.5">
-              <div className="text-xs font-medium text-slate-500">Latest Impedance |Z|</div>
+              <div className="text-xs font-medium text-slate-500">Latest Impedance</div>
               <div className="mt-1 flex items-baseline gap-1.5">
-                <span className="text-2xl font-mono font-bold text-slate-900 tabular-nums">
-                  {latestActivePoint ? latestActivePoint.value.toFixed(1) : "—"}
+                <span className="text-2xl font-mono font-bold text-arc-accent2 tabular-nums">
+                  {latestActivePoint ? latestActivePoint.value.toFixed(2) : "—"}
                 </span>
                 <span className="text-xs font-mono text-slate-500">
-                  {latestActivePoint ? "Ω" : ""}
+                  {latestActivePoint ? activeUnit : ""}
                 </span>
               </div>
             </div>
 
             <div className="bg-white rounded-xl border border-slate-200 px-4 py-3.5">
-              <div className="text-xs font-medium text-slate-500">Node Patterns</div>
-              <div className="mt-1 flex items-baseline gap-2">
+              <div className="text-xs font-medium text-slate-500">DC Voltage (DC V)</div>
+              <div className="mt-1 flex items-baseline gap-1.5">
                 <span className="text-2xl font-mono font-bold text-arc-accent tabular-nums">
+                  {latestActivePoint?.dcV !== undefined
+                    ? latestActivePoint.dcV.toFixed(3)
+                    : "—"}
+                </span>
+                <span className="text-xs font-mono text-slate-500">
+                  {latestActivePoint?.dcV !== undefined ? "V" : ""}
+                </span>
+              </div>
+            </div>
+
+            <div className="bg-white rounded-xl border border-slate-200 px-4 py-3.5">
+              <div className="text-xs font-medium text-slate-500">RAW ADC</div>
+              <div className="mt-1 flex items-baseline gap-2">
+                <span className="text-2xl font-mono font-bold text-violet-700 tabular-nums">
+                  {latestActivePoint?.rawAdc !== undefined
+                    ? latestActivePoint.rawAdc.toFixed(1)
+                    : "—"}
+                </span>
+                <span className="text-xs font-mono text-slate-500 truncate">
+                  {activeNode ? activeNode.intervalLabel : ""}
+                </span>
+              </div>
+            </div>
+
+            <div className="bg-white rounded-xl border border-slate-200 px-4 py-3.5">
+              <div className="text-xs font-medium text-slate-500">Identified Patterns</div>
+              <div className="mt-1 flex items-baseline gap-2">
+                <span className="text-2xl font-mono font-bold text-slate-900 tabular-nums">
                   {activeNodePatterns.length}
                 </span>
                 <span className="text-xs font-mono text-slate-500 tabular-nums">
@@ -527,7 +552,6 @@ export default function HomePage() {
             </div>
           </div>
 
-          {/* Center Viewport: Time vs. Impedance Chart */}
           {activeNode && activeTree ? (
             <>
               <ImpedanceChart
@@ -537,6 +561,7 @@ export default function HomePage() {
                 location={activeNode.location}
                 csvFileName={activeNode.csvFileName}
                 intervalLabel={activeNode.intervalLabel}
+                unit={activeUnit}
                 points={activeNode.points}
                 patterns={activeNodePatterns}
                 focusedWindow={focusedWindow}
@@ -550,9 +575,10 @@ export default function HomePage() {
                 }}
               />
 
-              {/* Directly Under Chart: Detailed Identified Patterns List + Cross-Dataset Matcher */}
               <PatternList
                 nodeName={activeNode.name}
+                unit={activeUnit}
+                points={activeNode.points}
                 patterns={activeNodePatterns}
                 activeFocusLabel={focusedWindow?.label ?? null}
                 similaritySourcePattern={similaritySource}
@@ -579,7 +605,7 @@ export default function HomePage() {
                 Create a Tree &amp; Sensor Node to Begin
               </h2>
               <p className="text-xs text-slate-500 max-w-md mx-auto">
-                Organize your ESP32 bio-impedance trackers by tree, attach Time vs. Impedance CSV files to each node, and explore patterns across datasets.
+                Organize your ESP32 bio-impedance trackers by tree, attach Time | RAW ADC | DC V | Impedance CSV files to each node, and explore patterns across datasets.
               </p>
               <button
                 type="button"
@@ -597,7 +623,6 @@ export default function HomePage() {
         </main>
       </div>
 
-      {/* Tree & Node/CSV Modals */}
       <TreeModal
         open={treeModalOpen}
         initialTree={editingTree}

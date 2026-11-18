@@ -29,11 +29,12 @@ import {
   Upload,
   X,
 } from "lucide-react";
-import type { CsvTelemetryPoint } from "@/lib/csvParser";
+import type { CsvTelemetryPoint, ImpedanceUnit } from "@/lib/csvParser";
 import type { IdentifiedPattern } from "@/lib/patternEngine";
 import { computePatternFromWindow } from "@/lib/patternEngine";
 
-export type ChartTimeRange = "24H" | "7D" | "30D" | "90D" | "ALL" | "custom";
+export type ChartTimeRange = "15M" | "1H" | "24H" | "7D" | "30D" | "ALL" | "custom";
+export type ChartChannel = "impedance" | "dcV" | "rawAdc";
 
 export interface FocusedChartWindow {
   startTs: number;
@@ -46,11 +47,9 @@ interface TooltipState {
   x: number;
   y: number;
   time: string;
-  zMag: string;
-  zReal?: string;
-  zImag?: string;
-  phase?: string;
-  tempC?: string;
+  impedance: string;
+  dcV?: string;
+  rawAdc?: string;
 }
 
 interface ImpedanceChartProps {
@@ -60,6 +59,7 @@ interface ImpedanceChartProps {
   location: string;
   csvFileName: string;
   intervalLabel: string;
+  unit: ImpedanceUnit;
   points: CsvTelemetryPoint[];
   patterns: IdentifiedPattern[];
   focusedWindow: FocusedChartWindow | null;
@@ -69,24 +69,39 @@ interface ImpedanceChartProps {
   onOpenCsvModal: () => void;
 }
 
-const CHART_THEME = {
-  bg: "#FFFFFF",
-  surface: "#F8FAFC",
-  border: "#E2E8F0",
-  line: "#2563EB",
-  topFill: "rgba(37, 99, 235, 0.14)",
-  bottomFill: "rgba(37, 99, 235, 0.0)",
-  muted: "#64748B",
-  text: "#0F172A",
-  textDim: "#475569",
-  grid: "#F1F5F9",
+const CHANNEL_CONFIG: Record<
+  ChartChannel,
+  { label: string; shortLabel: string; line: string; topFill: string; bottomFill: string }
+> = {
+  impedance: {
+    label: "Impedance",
+    shortLabel: "Impedance",
+    line: "#2563EB",
+    topFill: "rgba(37, 99, 235, 0.14)",
+    bottomFill: "rgba(37, 99, 235, 0.0)",
+  },
+  dcV: {
+    label: "DC V",
+    shortLabel: "DC V",
+    line: "#2D6A4F",
+    topFill: "rgba(45, 106, 79, 0.14)",
+    bottomFill: "rgba(45, 106, 79, 0.0)",
+  },
+  rawAdc: {
+    label: "RAW ADC",
+    shortLabel: "RAW ADC",
+    line: "#7C3AED",
+    topFill: "rgba(124, 58, 237, 0.12)",
+    bottomFill: "rgba(124, 58, 237, 0.0)",
+  },
 };
 
 const RANGE_BUTTONS: { label: string; value: ChartTimeRange }[] = [
+  { label: "15M", value: "15M" },
+  { label: "1H", value: "1H" },
   { label: "24H", value: "24H" },
   { label: "7D", value: "7D" },
   { label: "30D", value: "30D" },
-  { label: "90D", value: "90D" },
   { label: "ALL", value: "ALL" },
   { label: "Custom", value: "custom" },
 ];
@@ -98,6 +113,7 @@ export default function ImpedanceChart({
   location,
   csvFileName,
   intervalLabel,
+  unit,
   points,
   patterns,
   focusedWindow,
@@ -111,6 +127,7 @@ export default function ImpedanceChart({
   const seriesRef = useRef<ISeriesApi<"Area"> | null>(null);
   const resizeObserver = useRef<ResizeObserver | null>(null);
 
+  const [channel, setChannel] = useState<ChartChannel>("impedance");
   const [range, setRange] = useState<ChartTimeRange>("ALL");
   const [customFrom, setCustomFrom] = useState("");
   const [customTo, setCustomTo] = useState("");
@@ -126,18 +143,22 @@ export default function ImpedanceChart({
     x: 0,
     y: 0,
     time: "",
-    zMag: "",
+    impedance: "",
   });
 
-  // Reset manual selection draft when switching nodes
+  const hasRawAdc = useMemo(() => points.some((p) => p.rawAdc !== undefined), [points]);
+  const hasDcV = useMemo(() => points.some((p) => p.dcV !== undefined), [points]);
+
+  // Reset to Impedance if switched node lacks selected secondary channel
   useEffect(() => {
     setSelectionMode(false);
     setPickStartTs(null);
     setPickEndTs(null);
     setDraftPatternName("");
-  }, [nodeId]);
+    if (channel === "rawAdc" && !hasRawAdc) setChannel("impedance");
+    if (channel === "dcV" && !hasDcV) setChannel("impedance");
+  }, [nodeId, channel, hasRawAdc, hasDcV]);
 
-  // Initialize default custom date bounds whenever node points change
   useEffect(() => {
     if (points.length === 0) return;
     const minDate = new Date(points[0].ts * 1000);
@@ -146,24 +167,31 @@ export default function ImpedanceChart({
     setCustomTo(format(maxDate, "yyyy-MM-dd"));
   }, [nodeId, points]);
 
-  // Filter visible points based on active timeframe
   const filteredPoints = useMemo(() => {
     if (points.length === 0) return [];
     const latestTs = points[points.length - 1].ts;
 
     if (range === "ALL") return points;
+    if (range === "15M") return points.filter((p) => p.ts >= latestTs - 15 * 60);
+    if (range === "1H") return points.filter((p) => p.ts >= latestTs - 3600);
     if (range === "24H") return points.filter((p) => p.ts >= latestTs - 24 * 3600);
     if (range === "7D") return points.filter((p) => p.ts >= latestTs - 7 * 86400);
     if (range === "30D") return points.filter((p) => p.ts >= latestTs - 30 * 86400);
-    if (range === "90D") return points.filter((p) => p.ts >= latestTs - 90 * 86400);
 
-    // Custom date range
-    const fromSec = customFrom ? Math.floor(new Date(`${customFrom}T00:00:00`).getTime() / 1000) : 0;
-    const toSec = customTo ? Math.floor(new Date(`${customTo}T23:59:59`).getTime() / 1000) : Number.MAX_SAFE_INTEGER;
+    const fromSec = customFrom
+      ? Math.floor(new Date(`${customFrom}T00:00:00`).getTime() / 1000)
+      : 0;
+    const toSec = customTo
+      ? Math.floor(new Date(`${customTo}T23:59:59`).getTime() / 1000)
+      : Number.MAX_SAFE_INTEGER;
     return points.filter((p) => p.ts >= fromSec && p.ts <= toSec);
   }, [points, range, customFrom, customTo]);
 
-  // Keep refs for chart event listeners
+  const spanSeconds = useMemo(() => {
+    if (filteredPoints.length < 2) return 0;
+    return filteredPoints[filteredPoints.length - 1].ts - filteredPoints[0].ts;
+  }, [filteredPoints]);
+
   const filteredPointsRef = useRef<CsvTelemetryPoint[]>(filteredPoints);
   filteredPointsRef.current = filteredPoints;
 
@@ -176,8 +204,11 @@ export default function ImpedanceChart({
   const pickEndRef = useRef(pickEndTs);
   pickEndRef.current = pickEndTs;
 
-  const rangeRef = useRef(range);
-  rangeRef.current = range;
+  const spanSecondsRef = useRef(spanSeconds);
+  spanSecondsRef.current = spanSeconds;
+
+  const unitRef = useRef(unit);
+  unitRef.current = unit;
 
   // Create chart instance once
   useEffect(() => {
@@ -185,14 +216,14 @@ export default function ImpedanceChart({
 
     const chart = createChart(containerRef.current, {
       layout: {
-        background: { type: ColorType.Solid, color: CHART_THEME.bg },
-        textColor: CHART_THEME.textDim,
+        background: { type: ColorType.Solid, color: "#FFFFFF" },
+        textColor: "#475569",
         fontFamily: "'JetBrains Mono', monospace",
         fontSize: 11,
       },
       grid: {
-        vertLines: { color: CHART_THEME.grid, style: LineStyle.Dotted },
-        horzLines: { color: CHART_THEME.grid, style: LineStyle.Dotted },
+        vertLines: { color: "#F1F5F9", style: LineStyle.Dotted },
+        horzLines: { color: "#F1F5F9", style: LineStyle.Dotted },
       },
       crosshair: {
         mode: CrosshairMode.Normal,
@@ -210,17 +241,19 @@ export default function ImpedanceChart({
         },
       },
       rightPriceScale: {
-        borderColor: CHART_THEME.border,
+        borderColor: "#E2E8F0",
         scaleMargins: { top: 0.12, bottom: 0.12 },
       },
       timeScale: {
-        borderColor: CHART_THEME.border,
+        borderColor: "#E2E8F0",
         timeVisible: true,
-        secondsVisible: false,
+        secondsVisible: true,
         tickMarkFormatter: (time: Time) => {
           const d = new Date((time as number) * 1000);
-          if (rangeRef.current === "24H") return format(d, "HH:mm");
-          if (rangeRef.current === "7D") return format(d, "MMM d HH:mm");
+          const span = spanSecondsRef.current;
+          if (span > 0 && span <= 6 * 3600) return format(d, "HH:mm:ss");
+          if (span > 0 && span <= 48 * 3600) return format(d, "HH:mm");
+          if (span > 0 && span <= 14 * 86400) return format(d, "MMM d HH:mm");
           return format(d, "MMM d");
         },
       },
@@ -229,16 +262,16 @@ export default function ImpedanceChart({
     });
 
     const series = chart.addAreaSeries({
-      lineColor: CHART_THEME.line,
-      topColor: CHART_THEME.topFill,
-      bottomColor: CHART_THEME.bottomFill,
+      lineColor: CHANNEL_CONFIG.impedance.line,
+      topColor: CHANNEL_CONFIG.impedance.topFill,
+      bottomColor: CHANNEL_CONFIG.impedance.bottomFill,
       lineWidth: 2,
       priceLineVisible: true,
-      priceLineColor: CHART_THEME.line,
+      priceLineColor: CHANNEL_CONFIG.impedance.line,
       lastValueVisible: true,
       crosshairMarkerVisible: true,
       crosshairMarkerRadius: 5,
-      crosshairMarkerBorderColor: CHART_THEME.line,
+      crosshairMarkerBorderColor: CHANNEL_CONFIG.impedance.line,
       crosshairMarkerBackgroundColor: "#FFFFFF",
     });
 
@@ -274,19 +307,20 @@ export default function ImpedanceChart({
         visible: true,
         x: param.point.x,
         y: param.point.y,
-        time: format(new Date(tsSec * 1000), "MMM d, yyyy · HH:mm"),
-        zMag: `${point.value.toFixed(2)} Ω`,
-        zReal: full?.zReal != null ? `${full.zReal.toFixed(2)} Ω` : undefined,
-        zImag: full?.zImag != null ? `${full.zImag.toFixed(2)} Ω` : undefined,
-        phase: full?.phase != null ? `${full.phase.toFixed(2)}°` : undefined,
-        tempC: full?.tempC != null ? `${full.tempC.toFixed(1)} °C` : undefined,
+        time: format(new Date(tsSec * 1000), "yyyy-MM-dd HH:mm:ss"),
+        impedance: `${(full?.value ?? point.value).toFixed(2)} ${unitRef.current}`,
+        dcV: full?.dcV != null ? `${full.dcV.toFixed(3)} V` : undefined,
+        rawAdc: full?.rawAdc != null ? `${full.rawAdc.toFixed(1)}` : undefined,
       });
     });
 
     chart.subscribeClick((param) => {
       if (!selectionModeRef.current || !param.time) return;
       const clickedTs = param.time as number;
-      if (pickStartRef.current === null || (pickStartRef.current !== null && pickEndRef.current !== null)) {
+      if (
+        pickStartRef.current === null ||
+        (pickStartRef.current !== null && pickEndRef.current !== null)
+      ) {
         setPickStartTs(clickedTs);
         setPickEndTs(null);
       } else {
@@ -302,9 +336,24 @@ export default function ImpedanceChart({
     };
   }, []);
 
-  // Feed data & pattern markers into chart
+  // Update series color, precision, and data when channel / points / markers change
   useEffect(() => {
     if (!seriesRef.current) return;
+
+    const cfg = CHANNEL_CONFIG[channel];
+    seriesRef.current.applyOptions({
+      lineColor: cfg.line,
+      topColor: cfg.topFill,
+      bottomColor: cfg.bottomFill,
+      priceLineColor: cfg.line,
+      crosshairMarkerBorderColor: cfg.line,
+      priceFormat:
+        channel === "dcV"
+          ? { type: "price", precision: 3, minMove: 0.001 }
+          : channel === "rawAdc"
+          ? { type: "price", precision: 1, minMove: 0.1 }
+          : { type: "price", precision: 2, minMove: 0.01 },
+    });
 
     if (filteredPoints.length === 0) {
       seriesRef.current.setData([]);
@@ -312,16 +361,23 @@ export default function ImpedanceChart({
       return;
     }
 
-    const lineData: LineData[] = filteredPoints.map((pt) => ({
-      time: pt.ts as UTCTimestamp,
-      value: pt.value,
-    }));
+    const lineData: LineData[] = [];
+    for (const pt of filteredPoints) {
+      const val =
+        channel === "dcV"
+          ? pt.dcV
+          : channel === "rawAdc"
+          ? pt.rawAdc
+          : pt.value;
+      if (val !== undefined) {
+        lineData.push({ time: pt.ts as UTCTimestamp, value: val });
+      }
+    }
+
     seriesRef.current.setData(lineData);
 
-    // Build markers for identified patterns + draft manual endpoints
     const minTs = filteredPoints[0].ts;
     const maxTs = filteredPoints[filteredPoints.length - 1].ts;
-
     const markers: SeriesMarker<Time>[] = [];
 
     for (const pat of patterns) {
@@ -398,13 +454,11 @@ export default function ImpedanceChart({
     if (!focusedWindow) {
       chartRef.current?.timeScale().fitContent();
     }
-  }, [filteredPoints, patterns, focusedWindow, pickStartTs, pickEndTs]);
+  }, [filteredPoints, channel, patterns, focusedWindow, pickStartTs, pickEndTs]);
 
-  // Zoom chart smoothly when a pattern or similarity match is focused
   useEffect(() => {
     if (!focusedWindow || !chartRef.current || points.length === 0) return;
 
-    // Ensure full points are visible if focused window sits outside current short timeframe
     const firstVisible = filteredPoints[0]?.ts ?? 0;
     const lastVisible = filteredPoints[filteredPoints.length - 1]?.ts ?? 0;
     if (focusedWindow.startTs < firstVisible || focusedWindow.endTs > lastVisible) {
@@ -412,7 +466,7 @@ export default function ImpedanceChart({
       return;
     }
 
-    const span = Math.max(3600 * 6, focusedWindow.endTs - focusedWindow.startTs);
+    const span = Math.max(30, focusedWindow.endTs - focusedWindow.startTs);
     const pad = Math.round(span * 0.65);
     const minAll = points[0].ts;
     const maxAll = points[points.length - 1].ts;
@@ -428,26 +482,26 @@ export default function ImpedanceChart({
     chartRef.current?.timeScale().fitContent();
   }, [onClearFocus]);
 
-  // Summary metrics for currently filtered dataset
+  const channelUnit = channel === "dcV" ? "V" : channel === "rawAdc" ? "ADC" : unit;
+  const channelPrecision = channel === "dcV" ? 3 : channel === "rawAdc" ? 1 : 2;
+
   const summary = useMemo(() => {
     if (filteredPoints.length === 0) return null;
-    const vals = filteredPoints.map((p) => p.value);
+    const vals = filteredPoints
+      .map((p) =>
+        channel === "dcV" ? p.dcV : channel === "rawAdc" ? p.rawAdc : p.value
+      )
+      .filter((v): v is number => v !== undefined);
+    if (vals.length === 0) return null;
     const min = Math.min(...vals);
     const max = Math.max(...vals);
     const avg = vals.reduce((a, b) => a + b, 0) / vals.length;
     const first = vals[0];
     const last = vals[vals.length - 1];
     const pct = first !== 0 ? ((last - first) / first) * 100 : 0;
-    return {
-      latest: last,
-      min,
-      max,
-      avg,
-      pct,
-    };
-  }, [filteredPoints]);
+    return { latest: last, min, max, avg, pct };
+  }, [filteredPoints, channel]);
 
-  // Draft pattern preview when 2 endpoints are clicked
   const draftPatternPreview = useMemo(() => {
     if (pickStartTs === null || pickEndTs === null) return null;
     return computePatternFromWindow({
@@ -458,12 +512,15 @@ export default function ImpedanceChart({
       name: draftPatternName || "Custom Pattern",
       source: "manual",
       category: "custom",
+      unit,
     });
-  }, [nodeId, points, pickStartTs, pickEndTs, draftPatternName]);
+  }, [nodeId, points, pickStartTs, pickEndTs, draftPatternName, unit]);
 
   const handleConfirmManualPattern = () => {
     if (!draftPatternPreview) return;
-    const finalName = draftPatternName.trim() || `Pattern (${format(new Date(draftPatternPreview.startTs * 1000), "MMM d HH:mm")})`;
+    const finalName =
+      draftPatternName.trim() ||
+      `Pattern (${format(new Date(draftPatternPreview.startTs * 1000), "HH:mm:ss")})`;
     onSaveManualPattern({
       ...draftPatternPreview,
       name: finalName,
@@ -478,7 +535,6 @@ export default function ImpedanceChart({
     <section className="flex flex-col bg-white rounded-xl border border-slate-200 overflow-hidden">
       {/* ── Chart Header Toolbar ── */}
       <div className="px-5 py-3.5 border-b border-slate-200 flex flex-wrap items-center justify-between gap-4">
-        {/* Left: Node identity & latest reading */}
         <div className="flex items-center gap-5 min-w-0">
           <div className="min-w-0">
             <div className="flex items-center gap-2 text-xs text-slate-500">
@@ -499,8 +555,10 @@ export default function ImpedanceChart({
           {summary && (
             <div className="hidden sm:flex items-baseline gap-2.5 pl-5 border-l border-slate-200">
               <span className="text-2xl font-mono font-bold text-slate-900 tabular-nums">
-                {summary.latest.toFixed(1)}
-                <span className="text-xs font-medium text-slate-400 ml-1">Ω</span>
+                {summary.latest.toFixed(channelPrecision)}
+                <span className="text-xs font-medium text-slate-400 ml-1">
+                  {channelUnit}
+                </span>
               </span>
               <span
                 className={clsx(
@@ -519,8 +577,50 @@ export default function ImpedanceChart({
           )}
         </div>
 
-        {/* Right: Timeframe selector + Pattern & CSV tools */}
+        {/* Right: Channel Switcher + Timeframe Switcher + Pattern & CSV Tools */}
         <div className="flex flex-wrap items-center gap-2">
+          {/* Metric channel selector (Impedance | DC V | RAW ADC) */}
+          <div className="flex items-center gap-0.5 bg-slate-100 rounded-lg p-1 border border-slate-200">
+            <button
+              type="button"
+              onClick={() => setChannel("impedance")}
+              className={clsx(
+                "px-2.5 py-1 text-xs font-medium rounded-md transition-colors whitespace-nowrap shrink-0",
+                channel === "impedance"
+                  ? "bg-white text-arc-accent2 shadow-sm font-semibold"
+                  : "text-slate-600 hover:text-slate-900"
+              )}
+            >
+              Impedance ({unit})
+            </button>
+            <button
+              type="button"
+              onClick={() => setChannel("dcV")}
+              disabled={!hasDcV}
+              className={clsx(
+                "px-2.5 py-1 text-xs font-medium rounded-md transition-colors whitespace-nowrap shrink-0 disabled:opacity-40",
+                channel === "dcV"
+                  ? "bg-white text-arc-accent shadow-sm font-semibold"
+                  : "text-slate-600 hover:text-slate-900"
+              )}
+            >
+              DC V
+            </button>
+            <button
+              type="button"
+              onClick={() => setChannel("rawAdc")}
+              disabled={!hasRawAdc}
+              className={clsx(
+                "px-2.5 py-1 text-xs font-medium rounded-md transition-colors whitespace-nowrap shrink-0 disabled:opacity-40",
+                channel === "rawAdc"
+                  ? "bg-white text-violet-700 shadow-sm font-semibold"
+                  : "text-slate-600 hover:text-slate-900"
+              )}
+            >
+              RAW ADC
+            </button>
+          </div>
+
           <div className="flex items-center gap-0.5 bg-slate-100 rounded-lg p-1 border border-slate-200">
             {RANGE_BUTTONS.map((btn) => (
               <button
@@ -531,7 +631,7 @@ export default function ImpedanceChart({
                   setRange(btn.value);
                 }}
                 className={clsx(
-                  "px-2.5 py-1 text-xs font-mono font-medium rounded-md transition-colors whitespace-nowrap shrink-0",
+                  "px-2 py-1 text-xs font-mono font-medium rounded-md transition-colors whitespace-nowrap shrink-0",
                   range === btn.value
                     ? "bg-white text-slate-900 shadow-sm font-semibold"
                     : "text-slate-600 hover:text-slate-900"
@@ -564,7 +664,7 @@ export default function ImpedanceChart({
           <button
             type="button"
             onClick={onAutoScanPatterns}
-            disabled={points.length < 12}
+            disabled={points.length < 10}
             className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border border-slate-200 bg-white text-slate-700 hover:border-slate-300 hover:bg-slate-50 transition-colors whitespace-nowrap shrink-0 disabled:opacity-40"
           >
             <ScanSearch className="w-3.5 h-3.5 text-arc-accent" />
@@ -624,20 +724,20 @@ export default function ImpedanceChart({
         <div className="px-5 py-2.5 bg-emerald-50/70 border-b border-emerald-200 flex flex-wrap items-center justify-between gap-3">
           <div className="text-xs text-emerald-950 font-medium">
             {pickStartTs === null && (
-              <span>Step 1: Click the start point of the pattern directly on the impedance curve.</span>
+              <span>Step 1: Click the start point of the pattern directly on the curve.</span>
             )}
             {pickStartTs !== null && pickEndTs === null && (
               <span className="font-mono tabular-nums">
-                Start set at {format(new Date(pickStartTs * 1000), "MMM d, HH:mm")} — Step 2: Click the end point on the chart.
+                Start set at {format(new Date(pickStartTs * 1000), "MMM d, HH:mm:ss")} — Step 2: Click the end point on the chart.
               </span>
             )}
             {draftPatternPreview && (
               <span className="font-mono tabular-nums">
                 Selected {draftPatternPreview.sampleCount} pts ·{" "}
-                {format(new Date(draftPatternPreview.startTs * 1000), "MMM d HH:mm")} →{" "}
-                {format(new Date(draftPatternPreview.endTs * 1000), "MMM d HH:mm")} · Δ
+                {format(new Date(draftPatternPreview.startTs * 1000), "HH:mm:ss")} →{" "}
+                {format(new Date(draftPatternPreview.endTs * 1000), "HH:mm:ss")} · Δ
                 {draftPatternPreview.deltaZ >= 0 ? "+" : ""}
-                {draftPatternPreview.deltaZ.toFixed(1)} Ω
+                {draftPatternPreview.deltaZ.toFixed(2)} {unit}
               </span>
             )}
           </div>
@@ -671,8 +771,8 @@ export default function ImpedanceChart({
       {focusedWindow && !selectionMode && (
         <div className="px-5 py-2 bg-blue-50/70 border-b border-blue-200 flex items-center justify-between gap-3 text-xs">
           <span className="font-medium text-blue-900 font-mono tabular-nums">
-            Focused: {focusedWindow.label} ({format(new Date(focusedWindow.startTs * 1000), "MMM d, yyyy HH:mm")} →{" "}
-            {format(new Date(focusedWindow.endTs * 1000), "MMM d, yyyy HH:mm")})
+            Focused: {focusedWindow.label} ({format(new Date(focusedWindow.startTs * 1000), "MMM d, HH:mm:ss")} →{" "}
+            {format(new Date(focusedWindow.endTs * 1000), "MMM d, HH:mm:ss")})
           </span>
           <button
             type="button"
@@ -702,7 +802,7 @@ export default function ImpedanceChart({
                 No CSV telemetry attached to {nodeName}
               </h3>
               <p className="text-xs text-slate-500">
-                Upload a Time vs. Impedance CSV file to plot the curve and identify recurring patterns.
+                Upload a Time | RAW ADC | DC V | Impedance CSV file to plot the curve and identify recurring patterns.
               </p>
               <button
                 type="button"
@@ -733,46 +833,34 @@ export default function ImpedanceChart({
 
         <div ref={containerRef} className="w-full h-full" />
 
-        {/* Crosshair tooltip */}
+        {/* Crosshair tooltip displaying Time | RAW ADC | DC V | Impedance */}
         {tooltip.visible && points.length > 0 && (
           <div
             className="absolute z-20 pointer-events-none"
             style={{
-              left: Math.min(tooltip.x + 16, (containerRef.current?.clientWidth ?? 500) - 195),
-              top: Math.max(tooltip.y - 84, 10),
+              left: Math.min(tooltip.x + 16, (containerRef.current?.clientWidth ?? 500) - 210),
+              top: Math.max(tooltip.y - 92, 10),
             }}
           >
-            <div className="bg-white/95 backdrop-blur-sm border border-slate-200 rounded-lg px-3 py-2 shadow-lg min-w-[175px]">
+            <div className="bg-white/95 backdrop-blur-sm border border-slate-200 rounded-lg px-3 py-2 shadow-lg min-w-[195px]">
               <div className="text-[11px] font-mono font-semibold text-slate-900 mb-1.5">
                 {tooltip.time}
               </div>
               <div className="space-y-0.5 text-xs font-mono tabular-nums">
                 <div className="flex justify-between gap-4">
-                  <span className="text-slate-500">|Z|</span>
-                  <span className="font-bold text-arc-accent2">{tooltip.zMag}</span>
+                  <span className="text-slate-500">Impedance</span>
+                  <span className="font-bold text-arc-accent2">{tooltip.impedance}</span>
                 </div>
-                {tooltip.zReal && (
+                {tooltip.dcV && (
                   <div className="flex justify-between gap-4">
-                    <span className="text-slate-500">R</span>
-                    <span className="text-slate-800">{tooltip.zReal}</span>
+                    <span className="text-slate-500">DC V</span>
+                    <span className="font-semibold text-arc-accent">{tooltip.dcV}</span>
                   </div>
                 )}
-                {tooltip.zImag && (
+                {tooltip.rawAdc && (
                   <div className="flex justify-between gap-4">
-                    <span className="text-slate-500">jX</span>
-                    <span className="text-slate-800">{tooltip.zImag}</span>
-                  </div>
-                )}
-                {tooltip.phase && (
-                  <div className="flex justify-between gap-4">
-                    <span className="text-slate-500">Phase</span>
-                    <span className="text-slate-800">{tooltip.phase}</span>
-                  </div>
-                )}
-                {tooltip.tempC && (
-                  <div className="flex justify-between gap-4">
-                    <span className="text-slate-500">Temp</span>
-                    <span className="text-slate-800">{tooltip.tempC}</span>
+                    <span className="text-slate-500">RAW ADC</span>
+                    <span className="font-semibold text-violet-700">{tooltip.rawAdc}</span>
                   </div>
                 )}
               </div>
@@ -792,24 +880,35 @@ export default function ImpedanceChart({
               </span>
             </div>
             <div className="flex items-center gap-1.5">
-              <span className="text-slate-500">Min |Z|:</span>
-              <span className="font-semibold text-slate-800">{summary.min.toFixed(2)} Ω</span>
+              <span className="text-slate-500">Min:</span>
+              <span className="font-semibold text-slate-800">
+                {summary.min.toFixed(channelPrecision)} {channelUnit}
+              </span>
             </div>
             <div className="flex items-center gap-1.5">
-              <span className="text-slate-500">Max |Z|:</span>
-              <span className="font-semibold text-slate-800">{summary.max.toFixed(2)} Ω</span>
+              <span className="text-slate-500">Max:</span>
+              <span className="font-semibold text-slate-800">
+                {summary.max.toFixed(channelPrecision)} {channelUnit}
+              </span>
             </div>
             <div className="flex items-center gap-1.5">
-              <span className="text-slate-500">Avg |Z|:</span>
-              <span className="font-semibold text-slate-800">{summary.avg.toFixed(2)} Ω</span>
+              <span className="text-slate-500">Avg:</span>
+              <span className="font-semibold text-slate-800">
+                {summary.avg.toFixed(channelPrecision)} {channelUnit}
+              </span>
             </div>
           </>
         ) : (
           <span className="text-slate-400">Awaiting CSV telemetry</span>
         )}
         <div className="ml-auto flex items-center gap-2 text-slate-500">
-          <span className="w-3 h-0.5 bg-arc-accent2 inline-block" />
-          <span>Time vs. Impedance |Z| (Ω)</span>
+          <span
+            className="w-3 h-0.5 inline-block"
+            style={{ backgroundColor: CHANNEL_CONFIG[channel].line }}
+          />
+          <span>
+            Time vs. {CHANNEL_CONFIG[channel].label} ({channelUnit})
+          </span>
         </div>
       </div>
     </section>

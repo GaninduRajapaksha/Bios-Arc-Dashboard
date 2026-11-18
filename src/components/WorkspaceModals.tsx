@@ -16,6 +16,7 @@ import {
   serializePointsToCsv,
   type CsvColumnMapping,
   type CsvTelemetryPoint,
+  type ImpedanceUnit,
   type ParsedCsvPreview,
 } from "@/lib/csvParser";
 
@@ -90,7 +91,7 @@ export function TreeModal({ open, initialTree, onClose, onSave }: TreeModalProps
               type="text"
               value={name}
               onChange={(e) => setName(e.target.value)}
-              placeholder="e.g., Specimen Oak Gamma"
+              placeholder="e.g., Dawal Loku Gaha"
               className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-arc-accent/25 focus:border-arc-accent"
               autoFocus
             />
@@ -104,7 +105,7 @@ export function TreeModal({ open, initialTree, onClose, onSave }: TreeModalProps
               type="text"
               value={species}
               onChange={(e) => setSpecies(e.target.value)}
-              placeholder="e.g., Quercus robur"
+              placeholder="e.g., Field Specimen"
               className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-arc-accent/25 focus:border-arc-accent"
             />
           </div>
@@ -117,7 +118,7 @@ export function TreeModal({ open, initialTree, onClose, onSave }: TreeModalProps
               rows={2}
               value={notes}
               onChange={(e) => setNotes(e.target.value)}
-              placeholder="Location, irrigation schedule, or experiment context"
+              placeholder="Location, logging interval, or experiment context"
               className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-arc-accent/25 focus:border-arc-accent resize-none"
             />
           </div>
@@ -157,6 +158,7 @@ interface NodeModalProps {
     firmware: string;
     csvFileName?: string;
     intervalLabel?: string;
+    unit?: ImpedanceUnit;
     points?: CsvTelemetryPoint[];
   }) => void;
 }
@@ -177,6 +179,7 @@ export function NodeModal({
   const [csvFileName, setCsvFileName] = useState("");
   const [csvPreview, setCsvPreview] = useState<ParsedCsvPreview | null>(null);
   const [mapping, setMapping] = useState<CsvColumnMapping | null>(null);
+  const [unit, setUnit] = useState<ImpedanceUnit>("kΩ");
   const [parseStatus, setParseStatus] = useState<{
     count: number;
     skipped: number;
@@ -192,6 +195,7 @@ export function NodeModal({
       setLocation(initialNode?.location ?? "");
       setFirmware(initialNode?.firmware ?? "v2.4.1");
       setCsvFileName(initialNode?.csvFileName ?? "");
+      setUnit(initialNode?.unit ?? "kΩ");
       setCsvPreview(null);
       setMapping(null);
       setParseStatus(null);
@@ -202,9 +206,18 @@ export function NodeModal({
 
   if (!open) return null;
 
-  const applyPreviewMapping = (preview: ParsedCsvPreview, nextMapping: CsvColumnMapping) => {
+  const applyPreviewMapping = (
+    preview: ParsedCsvPreview,
+    nextMapping: CsvColumnMapping,
+    nextUnit: ImpedanceUnit
+  ) => {
     try {
-      const result = buildPointsFromCsv(preview.headers, preview.rows, nextMapping);
+      const result = buildPointsFromCsv(
+        preview.headers,
+        preview.rows,
+        nextMapping,
+        nextUnit
+      );
       setParsedPoints(result.points);
       setParseStatus({
         count: result.points.length,
@@ -226,7 +239,8 @@ export function NodeModal({
       setCsvFileName(file.name);
       setCsvPreview(preview);
       setMapping(preview.suggestedMapping);
-      applyPreviewMapping(preview, preview.suggestedMapping);
+      setUnit(preview.detectedUnit);
+      applyPreviewMapping(preview, preview.suggestedMapping, preview.detectedUnit);
     } catch (err) {
       setCsvPreview(null);
       setParsedPoints(null);
@@ -237,7 +251,7 @@ export function NodeModal({
 
   const handleDownloadCurrentCsv = () => {
     if (!initialNode || initialNode.points.length === 0) return;
-    const csv = serializePointsToCsv(initialNode.points);
+    const csv = serializePointsToCsv(initialNode.points, initialNode.unit);
     const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
@@ -266,6 +280,7 @@ export function NodeModal({
       firmware: firmware.trim() || "v2.4.1",
       csvFileName: parsedPoints ? csvFileName : initialNode?.csvFileName,
       intervalLabel: parseStatus?.intervalLabel ?? initialNode?.intervalLabel,
+      unit: parsedPoints ? unit : initialNode?.unit ?? "kΩ",
       points: parsedPoints ?? undefined,
     });
     onClose();
@@ -273,7 +288,7 @@ export function NodeModal({
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4">
-      <div className="w-full max-w-xl bg-white border border-slate-200 rounded-xl shadow-xl overflow-hidden max-h-[90vh] flex flex-col">
+      <div className="w-full max-w-2xl bg-white border border-slate-200 rounded-xl shadow-xl overflow-hidden max-h-[90vh] flex flex-col">
         <div className="px-5 py-4 border-b border-slate-200 flex items-center justify-between flex-shrink-0">
           <h2 className="text-base font-semibold text-slate-900">
             {initialNode ? `Edit ${initialNode.name}` : "Add Sensor Node & CSV"}
@@ -304,7 +319,7 @@ export function NodeModal({
                 type="text"
                 value={name}
                 onChange={(e) => setName(e.target.value)}
-                placeholder="e.g., Node_ESP32_05"
+                placeholder="e.g., Dawal_Node_01"
                 className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-arc-accent/25 focus:border-arc-accent"
                 autoFocus
               />
@@ -335,7 +350,7 @@ export function NodeModal({
                 type="text"
                 value={location}
                 onChange={(e) => setLocation(e.target.value)}
-                placeholder="e.g., Upper Trunk, Branch B"
+                placeholder="e.g., Lower Trunk, Branch B"
                 className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-arc-accent/25 focus:border-arc-accent"
               />
             </div>
@@ -358,7 +373,7 @@ export function NodeModal({
           <div className="pt-1">
             <div className="flex items-center justify-between mb-1.5">
               <label className="text-xs font-semibold text-slate-700">
-                Time vs. Impedance CSV Data
+                Logger CSV Data (Time | RAW ADC | DC V | Impedance)
               </label>
               {initialNode && initialNode.points.length > 0 && (
                 <button
@@ -385,7 +400,7 @@ export function NodeModal({
               <input
                 ref={fileInputRef}
                 type="file"
-                accept=".csv,text/csv"
+                accept=".csv,.txt,text/csv,text/plain"
                 className="hidden"
                 onChange={(e) => {
                   const file = e.target.files?.[0];
@@ -397,10 +412,10 @@ export function NodeModal({
                 <div className="text-xs font-medium text-slate-700">
                   {csvFileName
                     ? `Selected: ${csvFileName}`
-                    : "Click or drag & drop a .csv file"}
+                    : "Click or drag & drop your .csv logger file"}
                 </div>
-                <div className="text-[11px] text-slate-500">
-                  Supports ISO timestamps, Unix seconds, or hour offsets paired with Impedance |Z| (Ω)
+                <div className="text-[11px] text-slate-500 font-mono">
+                  Direct support for pipe-delimited &ldquo;2026-11-18 15:08:04 | 732.0 | 2.361 V | 28.50 kOhm&rdquo; &amp; standard CSV
                 </div>
               </div>
             </div>
@@ -409,29 +424,30 @@ export function NodeModal({
           {/* Column mapping & validation feedback */}
           {csvPreview && mapping && (
             <div className="rounded-lg border border-slate-200 bg-slate-50 p-3.5 space-y-3">
-              <div className="flex items-center justify-between text-xs">
+              <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
                 <span className="font-semibold text-slate-800 inline-flex items-center gap-1.5">
                   <FileSpreadsheet className="w-4 h-4 text-arc-accent" />
-                  CSV Column Mapping
+                  Detected Columns ({csvPreview.delimiter === "|" ? "Pipe |" : csvPreview.delimiter}
+                  {csvPreview.headerless ? " · Headerless" : ""})
                 </span>
                 <span className="font-mono text-slate-500 tabular-nums">
-                  {csvPreview.rows.length} rows detected
+                  {csvPreview.rows.length} rows
                 </span>
               </div>
 
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
                 <div>
                   <label className="block text-[11px] font-medium text-slate-600 mb-1">
-                    Time Column
+                    Time
                   </label>
                   <select
                     value={mapping.timeCol}
                     onChange={(e) => {
                       const next = { ...mapping, timeCol: e.target.value };
                       setMapping(next);
-                      applyPreviewMapping(csvPreview, next);
+                      applyPreviewMapping(csvPreview, next, unit);
                     }}
-                    className="w-full px-2.5 py-1.5 text-xs font-mono border border-slate-300 rounded-md bg-white"
+                    className="w-full px-2 py-1.5 text-xs font-mono border border-slate-300 rounded-md bg-white"
                   >
                     {csvPreview.headers.map((h) => (
                       <option key={h} value={h}>
@@ -443,16 +459,66 @@ export function NodeModal({
 
                 <div>
                   <label className="block text-[11px] font-medium text-slate-600 mb-1">
-                    Impedance |Z| Column
+                    RAW ADC
+                  </label>
+                  <select
+                    value={mapping.rawAdcCol ?? ""}
+                    onChange={(e) => {
+                      const next = {
+                        ...mapping,
+                        rawAdcCol: e.target.value || undefined,
+                      };
+                      setMapping(next);
+                      applyPreviewMapping(csvPreview, next, unit);
+                    }}
+                    className="w-full px-2 py-1.5 text-xs font-mono border border-slate-300 rounded-md bg-white"
+                  >
+                    <option value="">None</option>
+                    {csvPreview.headers.map((h) => (
+                      <option key={h} value={h}>
+                        {h}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-[11px] font-medium text-slate-600 mb-1">
+                    DC V
+                  </label>
+                  <select
+                    value={mapping.dcVCol ?? ""}
+                    onChange={(e) => {
+                      const next = {
+                        ...mapping,
+                        dcVCol: e.target.value || undefined,
+                      };
+                      setMapping(next);
+                      applyPreviewMapping(csvPreview, next, unit);
+                    }}
+                    className="w-full px-2 py-1.5 text-xs font-mono border border-slate-300 rounded-md bg-white"
+                  >
+                    <option value="">None</option>
+                    {csvPreview.headers.map((h) => (
+                      <option key={h} value={h}>
+                        {h}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-[11px] font-medium text-slate-600 mb-1">
+                    Impedance ({unit})
                   </label>
                   <select
                     value={mapping.impedanceCol}
                     onChange={(e) => {
                       const next = { ...mapping, impedanceCol: e.target.value };
                       setMapping(next);
-                      applyPreviewMapping(csvPreview, next);
+                      applyPreviewMapping(csvPreview, next, unit);
                     }}
-                    className="w-full px-2.5 py-1.5 text-xs font-mono border border-slate-300 rounded-md bg-white"
+                    className="w-full px-2 py-1.5 text-xs font-mono border border-slate-300 rounded-md bg-white"
                   >
                     {csvPreview.headers.map((h) => (
                       <option key={h} value={h}>
@@ -468,7 +534,7 @@ export function NodeModal({
                   <CheckCircle2 className="w-4 h-4 flex-shrink-0" />
                   <span className="tabular-nums">
                     Ready: {parseStatus.count.toLocaleString()} valid points ·{" "}
-                    {parseStatus.intervalLabel}
+                    {parseStatus.intervalLabel} · Unit: {unit}
                     {parseStatus.skipped > 0
                       ? ` · ${parseStatus.skipped} skipped`
                       : ""}

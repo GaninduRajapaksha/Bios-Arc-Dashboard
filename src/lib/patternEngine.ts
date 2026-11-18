@@ -1,4 +1,4 @@
-import type { CsvTelemetryPoint } from "./csvParser";
+import type { CsvTelemetryPoint, ImpedanceUnit } from "./csvParser";
 
 export type PatternSource = "auto" | "manual";
 export type PatternCategory = "spike" | "drop" | "drift" | "oscillation" | "custom";
@@ -14,6 +14,8 @@ export interface IdentifiedPattern {
   minZ: number;
   maxZ: number;
   avgZ: number;
+  avgDcV?: number;
+  avgRawAdc?: number;
   deltaZ: number;
   deltaPct: number;
   sampleCount: number;
@@ -27,6 +29,7 @@ export interface SimilarityMatch {
   targetNodeName: string;
   targetTreeId: string;
   targetTreeName: string;
+  targetUnit: ImpedanceUnit;
   startTs: number;
   endTs: number;
   similarityScore: number;
@@ -48,8 +51,10 @@ export function computePatternFromWindow(params: {
   name: string;
   source: PatternSource;
   category: PatternCategory;
+  unit?: ImpedanceUnit;
   summaryNote?: string;
 }): IdentifiedPattern | null {
+  const unit = params.unit ?? "kΩ";
   const lo = Math.min(params.startTs, params.endTs);
   const hi = Math.max(params.startTs, params.endTs);
   const slice = params.points.filter((p) => p.ts >= lo && p.ts <= hi);
@@ -65,16 +70,27 @@ export function computePatternFromWindow(params: {
   const deltaZ = last - first;
   const deltaPct = first !== 0 ? (deltaZ / first) * 100 : 0;
 
+  const dcVals = slice.map((p) => p.dcV).filter((v): v is number => v !== undefined);
+  const adcVals = slice.map((p) => p.rawAdc).filter((v): v is number => v !== undefined);
+  const avgDcV =
+    dcVals.length > 0
+      ? parseFloat((dcVals.reduce((a, b) => a + b, 0) / dcVals.length).toFixed(3))
+      : undefined;
+  const avgRawAdc =
+    adcVals.length > 0
+      ? parseFloat((adcVals.reduce((a, b) => a + b, 0) / adcVals.length).toFixed(1))
+      : undefined;
+
   const defaultNote =
     params.category === "spike"
-      ? `Peak excursion to ${maxZ.toFixed(1)} Ω across ${slice.length} samples`
+      ? `Peak excursion to ${maxZ.toFixed(2)} ${unit} across ${slice.length} samples`
       : params.category === "drop"
-      ? `Sharp drop to ${minZ.toFixed(1)} Ω (${deltaPct.toFixed(1)}% shift)`
+      ? `Sharp drop to ${minZ.toFixed(2)} ${unit} (${deltaPct.toFixed(1)}% shift)`
       : params.category === "drift"
-      ? `Sustained ${deltaZ >= 0 ? "upward" : "downward"} trend of ${deltaZ >= 0 ? "+" : ""}${deltaZ.toFixed(1)} Ω`
+      ? `Sustained ${deltaZ >= 0 ? "upward" : "downward"} drift of ${deltaZ >= 0 ? "+" : ""}${deltaZ.toFixed(2)} ${unit}`
       : params.category === "oscillation"
-      ? `High-variance band spanning ${(maxZ - minZ).toFixed(1)} Ω`
-      : `User-selected segment (${slice.length} samples, ${deltaZ >= 0 ? "+" : ""}${deltaZ.toFixed(1)} Ω)`;
+      ? `High-variance band spanning ${(maxZ - minZ).toFixed(2)} ${unit}`
+      : `User-selected segment (${slice.length} samples, ${deltaZ >= 0 ? "+" : ""}${deltaZ.toFixed(2)} ${unit})`;
 
   return {
     id: makeId("pat"),
@@ -87,6 +103,8 @@ export function computePatternFromWindow(params: {
     minZ: parseFloat(minZ.toFixed(2)),
     maxZ: parseFloat(maxZ.toFixed(2)),
     avgZ: parseFloat(avgZ.toFixed(2)),
+    avgDcV,
+    avgRawAdc,
     deltaZ: parseFloat(deltaZ.toFixed(2)),
     deltaPct: parseFloat(deltaPct.toFixed(2)),
     sampleCount: slice.length,
@@ -97,20 +115,20 @@ export function computePatternFromWindow(params: {
 
 /**
  * Automatically detects physiological impedance anomalies & behavioral patterns:
- * spikes, sharp hydration drops, sustained drifts, and oscillation bursts.
+ * spikes, sharp drops, sustained drifts, and oscillation bursts.
  */
 export function detectPatternsForNode(
   nodeId: string,
-  points: CsvTelemetryPoint[]
+  points: CsvTelemetryPoint[],
+  unit: ImpedanceUnit = "kΩ"
 ): IdentifiedPattern[] {
-  if (points.length < 12) return [];
+  if (points.length < 10) return [];
 
   const values = points.map((p) => p.value);
   const n = values.length;
   const globalMean = values.reduce((a, b) => a + b, 0) / n;
-  const globalStd = Math.sqrt(
-    values.reduce((acc, v) => acc + (v - globalMean) ** 2, 0) / n
-  ) || 1;
+  const globalStd =
+    Math.sqrt(values.reduce((acc, v) => acc + (v - globalMean) ** 2, 0) / n) || 0.01;
 
   const detected: IdentifiedPattern[] = [];
   const usedRanges: Array<[number, number]> = [];
@@ -118,8 +136,8 @@ export function detectPatternsForNode(
   const overlaps = (s: number, e: number) =>
     usedRanges.some(([rs, re]) => Math.max(s, rs) <= Math.min(e, re));
 
-  // 1. Detect sharpest local spikes and drops using short-window baseline deviation
-  const windowHalf = 4;
+  // 1. Detect sharpest local spikes and drops (or rapid step jumps)
+  const windowHalf = Math.min(4, Math.floor(n / 6));
   const candidates: Array<{ idx: number; zScore: number; type: "spike" | "drop" }> = [];
 
   for (let i = windowHalf; i < n - windowHalf; i++) {
@@ -132,12 +150,12 @@ export function detectPatternsForNode(
     const localStd =
       Math.sqrt(
         neighborhood.reduce((a, v) => a + (v - localMean) ** 2, 0) / neighborhood.length
-      ) || globalStd * 0.4;
+      ) || globalStd * 0.35;
 
-    const z = (values[i] - localMean) / Math.max(localStd, globalStd * 0.25);
-    if (z > 2.2) {
+    const z = (values[i] - localMean) / Math.max(localStd, globalStd * 0.2);
+    if (z > 2.0) {
       candidates.push({ idx: i, zScore: z, type: "spike" });
-    } else if (z < -2.2) {
+    } else if (z < -2.0) {
       candidates.push({ idx: i, zScore: Math.abs(z), type: "drop" });
     }
   }
@@ -154,7 +172,7 @@ export function detectPatternsForNode(
     const name =
       cand.type === "spike"
         ? `Impedance Spike #${spikeNum++}`
-        : `Hydration Drop #${dropNum++}`;
+        : `Impedance Drop #${dropNum++}`;
 
     const pat = computePatternFromWindow({
       nodeId,
@@ -164,6 +182,7 @@ export function detectPatternsForNode(
       name,
       source: "auto",
       category: cand.type,
+      unit,
     });
 
     if (pat) {
@@ -174,22 +193,22 @@ export function detectPatternsForNode(
   }
 
   // 2. Detect sustained directional drift (multi-point trend)
-  const driftSpan = Math.min(24, Math.floor(n / 3));
-  if (driftSpan >= 8) {
+  const driftSpan = Math.min(28, Math.max(8, Math.floor(n / 3)));
+  if (n >= driftSpan) {
     let bestDrift = { start: 0, end: 0, score: 0, delta: 0 };
-    for (let i = 0; i <= n - driftSpan; i += 3) {
+    for (let i = 0; i <= n - driftSpan; i += Math.max(2, Math.floor(driftSpan / 6))) {
       const startVal = values.slice(i, i + 3).reduce((a, b) => a + b, 0) / 3;
       const endVal =
         values.slice(i + driftSpan - 3, i + driftSpan).reduce((a, b) => a + b, 0) / 3;
       const delta = endVal - startVal;
       const score = Math.abs(delta) / globalStd;
-      if (score > 1.35 && score > bestDrift.score && !overlaps(i, i + driftSpan - 1)) {
+      if (score > 1.15 && score > bestDrift.score && !overlaps(i, i + driftSpan - 1)) {
         bestDrift = { start: i, end: i + driftSpan - 1, score, delta };
       }
     }
 
     if (bestDrift.score > 0) {
-      const dirLabel = bestDrift.delta >= 0 ? "Upward Drift" : "Downward Recovery";
+      const dirLabel = bestDrift.delta >= 0 ? "Upward Impedance Drift" : "Downward Recovery Drift";
       const pat = computePatternFromWindow({
         nodeId,
         points,
@@ -198,6 +217,7 @@ export function detectPatternsForNode(
         name: `${dirLabel} #1`,
         source: "auto",
         category: "drift",
+        unit,
       });
       if (pat) {
         detected.push(pat);
@@ -206,29 +226,36 @@ export function detectPatternsForNode(
     }
   }
 
-  // 3. Detect high-variance oscillation burst
-  const oscSpan = Math.min(18, Math.floor(n / 4));
-  if (oscSpan >= 8) {
-    let bestOsc = { start: 0, end: 0, ratio: 0 };
-    for (let i = 0; i <= n - oscSpan; i += 3) {
-      if (overlaps(i, i + oscSpan - 1)) continue;
-      const seg = values.slice(i, i + oscSpan);
+  // 3. Detect steepest local step/ramp or oscillation burst
+  const stepSpan = Math.min(16, Math.max(6, Math.floor(n / 5)));
+  if (n >= stepSpan) {
+    let bestStep = { start: 0, end: 0, ratio: 0, delta: 0 };
+    for (let i = 0; i <= n - stepSpan; i += 2) {
+      if (overlaps(i, i + stepSpan - 1)) continue;
+      const seg = values.slice(i, i + stepSpan);
       const mean = seg.reduce((a, b) => a + b, 0) / seg.length;
       const std = Math.sqrt(seg.reduce((a, v) => a + (v - mean) ** 2, 0) / seg.length);
       const ratio = std / globalStd;
-      if (ratio > 1.25 && ratio > bestOsc.ratio) {
-        bestOsc = { start: i, end: i + oscSpan - 1, ratio };
+      if (ratio > 0.75 && ratio > bestStep.ratio) {
+        bestStep = {
+          start: i,
+          end: i + stepSpan - 1,
+          ratio,
+          delta: seg[seg.length - 1] - seg[0],
+        };
       }
     }
-    if (bestOsc.ratio > 0) {
+    if (bestStep.ratio > 0) {
+      const isRamp = Math.abs(bestStep.delta) > globalStd * 0.8;
       const pat = computePatternFromWindow({
         nodeId,
         points,
-        startTs: points[bestOsc.start].ts,
-        endTs: points[bestOsc.end].ts,
-        name: "Diurnal Stress Oscillation #1",
+        startTs: points[bestStep.start].ts,
+        endTs: points[bestStep.end].ts,
+        name: isRamp ? "Rapid Impedance Shift #1" : "Variance Oscillation #1",
         source: "auto",
-        category: "oscillation",
+        category: isRamp ? "drift" : "oscillation",
+        unit,
       });
       if (pat) {
         detected.push(pat);
@@ -293,13 +320,10 @@ export interface SearchableNodeDataset {
   nodeName: string;
   treeId: string;
   treeName: string;
+  unit: ImpedanceUnit;
   points: CsvTelemetryPoint[];
 }
 
-/**
- * Slides across every node's CSV dataset to find time segments with matching
- * impedance shape & dynamic range.
- */
 export function findSimilarPatternsAcrossDatasets(
   queryPattern: IdentifiedPattern,
   sourcePoints: CsvTelemetryPoint[],
@@ -330,7 +354,6 @@ export function findSimilarPatternsAcrossDatasets(
       const startTs = candidatePts[0].ts;
       const endTs = candidatePts[candidatePts.length - 1].ts;
 
-      // Skip the exact same pattern window on the source node
       if (
         ds.nodeId === queryPattern.nodeId &&
         Math.max(startTs, queryPattern.startTs) <= Math.min(endTs, queryPattern.endTs)
@@ -342,9 +365,9 @@ export function findSimilarPatternsAcrossDatasets(
       const candResampled = resampleArray(candVals, normLen);
       const candNorm = zNormalize(candResampled);
 
-      const corr = pearsonCorrelation(queryNorm, candNorm); // -1..1
+      const corr = pearsonCorrelation(queryNorm, candNorm);
       const dtw = dtwDistance(queryNorm, candNorm);
-      const dtwSim = Math.exp(-dtw * 1.4); // 0..1
+      const dtwSim = Math.exp(-dtw * 1.4);
 
       const candSpan = Math.max(...candVals) - Math.min(...candVals);
       const spanRatio =
@@ -354,7 +377,7 @@ export function findSimilarPatternsAcrossDatasets(
 
       const candDelta = candVals[candVals.length - 1] - candVals[0];
       const sameDirection =
-        Math.abs(queryDelta) < 2 || Math.sign(queryDelta) === Math.sign(candDelta) ? 1 : 0.72;
+        Math.abs(queryDelta) < 0.05 || Math.sign(queryDelta) === Math.sign(candDelta) ? 1 : 0.72;
 
       const corrScore = Math.max(0, corr);
       const combined = (0.5 * corrScore + 0.32 * dtwSim + 0.18 * spanRatio) * sameDirection * 100;
@@ -370,6 +393,7 @@ export function findSimilarPatternsAcrossDatasets(
           targetNodeName: ds.nodeName,
           targetTreeId: ds.treeId,
           targetTreeName: ds.treeName,
+          targetUnit: ds.unit,
           startTs,
           endTs,
           similarityScore,
@@ -382,7 +406,6 @@ export function findSimilarPatternsAcrossDatasets(
     }
   }
 
-  // Non-maximum suppression per node so overlapping windows don't spam results
   rawMatches.sort((a, b) => b.similarityScore - a.similarityScore);
   const filtered: SimilarityMatch[] = [];
 

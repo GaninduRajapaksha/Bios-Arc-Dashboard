@@ -17,6 +17,7 @@ import {
   TrendingUp,
   X,
 } from "lucide-react";
+import type { CsvTelemetryPoint, ImpedanceUnit } from "@/lib/csvParser";
 import type {
   IdentifiedPattern,
   PatternCategory,
@@ -25,6 +26,8 @@ import type {
 
 interface PatternListProps {
   nodeName: string;
+  unit: ImpedanceUnit;
+  points: CsvTelemetryPoint[];
   patterns: IdentifiedPattern[];
   activeFocusLabel: string | null;
   similaritySourcePattern: IdentifiedPattern | null;
@@ -51,15 +54,30 @@ const CATEGORY_META: Record<
 };
 
 function formatDuration(startTs: number, endTs: number): string {
-  const hours = Math.max(1, Math.round((endTs - startTs) / 3600));
+  const sec = Math.max(1, endTs - startTs);
+  if (sec < 60) return `${sec}s`;
+  if (sec < 3600) {
+    const mins = Math.floor(sec / 60);
+    const remSec = sec % 60;
+    return remSec > 0 ? `${mins}m ${remSec}s` : `${mins}m`;
+  }
+  const hours = Math.round(sec / 3600);
   if (hours < 24) return `${hours}h`;
   const days = Math.floor(hours / 24);
   const remHours = hours % 24;
   return remHours > 0 ? `${days}d ${remHours}h` : `${days}d`;
 }
 
+function formatWindowRange(startTs: number, endTs: number): string {
+  const shortSpan = endTs - startTs < 24 * 3600;
+  const fmt = shortSpan ? "MMM d HH:mm:ss" : "MMM d HH:mm";
+  return `${format(new Date(startTs * 1000), fmt)} → ${format(new Date(endTs * 1000), fmt)}`;
+}
+
 export default function PatternList({
   nodeName,
+  unit,
+  points,
   patterns,
   activeFocusLabel,
   similaritySourcePattern,
@@ -73,6 +91,7 @@ export default function PatternList({
   onCloseSimilarity,
   onJumpToMatch,
 }: PatternListProps) {
+  const [bottomView, setBottomView] = useState<"patterns" | "csv">("patterns");
   const [sourceFilter, setSourceFilter] = useState<"all" | "auto" | "manual">("all");
   const [searchQuery, setSearchQuery] = useState("");
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -174,15 +193,16 @@ export default function PatternList({
                       <span className="font-medium text-arc-accent">{m.targetNodeName}</span>
                     </div>
                     <div className="text-xs font-mono text-slate-600 tabular-nums mt-0.5">
-                      {format(new Date(m.startTs * 1000), "MMM d, yyyy HH:mm")} &rarr;{" "}
-                      {format(new Date(m.endTs * 1000), "MMM d, HH:mm")} · {m.sampleCount} pts
+                      {formatWindowRange(m.startTs, m.endTs)} · {m.sampleCount} pts
                     </div>
                   </div>
 
                   <div className="flex items-center gap-5 text-xs font-mono tabular-nums">
                     <div>
                       <span className="text-slate-400 mr-1.5">Avg</span>
-                      <span className="font-semibold text-slate-800">{m.avgZ.toFixed(1)} Ω</span>
+                      <span className="font-semibold text-slate-800">
+                        {m.avgZ.toFixed(2)} {m.targetUnit}
+                      </span>
                     </div>
                     <div>
                       <span className="text-slate-400 mr-1.5">Δ</span>
@@ -193,7 +213,7 @@ export default function PatternList({
                         )}
                       >
                         {m.deltaZ >= 0 ? "+" : ""}
-                        {m.deltaZ.toFixed(1)} Ω ({m.deltaPct.toFixed(1)}%)
+                        {m.deltaZ.toFixed(2)} {m.targetUnit} ({m.deltaPct.toFixed(1)}%)
                       </span>
                     </div>
                     <div className="text-right min-w-[68px]">
@@ -218,59 +238,134 @@ export default function PatternList({
         </section>
       )}
 
-      {/* ── Identified Patterns Detailed List (Under Chart) ── */}
+      {/* ── Identified Patterns + Raw Logger Data Table (Under Chart) ── */}
       <section className="bg-white rounded-xl border border-slate-200 overflow-hidden">
         <div className="px-5 py-3.5 border-b border-slate-200 flex flex-wrap items-center justify-between gap-3">
-          <div>
-            <h2 className="text-sm font-bold text-slate-900">
-              Identified Patterns for {nodeName}
-            </h2>
-            <p className="text-xs text-slate-500 font-mono tabular-nums mt-0.5">
-              {patterns.length} {patterns.length === 1 ? "pattern" : "patterns"} recorded · Rename, focus on chart, or scan all node datasets for matches
-            </p>
-          </div>
-
-          <div className="flex flex-wrap items-center gap-2">
-            {/* Search input */}
-            <div className="relative">
-              <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
-              <input
-                type="text"
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                placeholder="Filter patterns..."
-                className="pl-8 pr-3 py-1.5 text-xs border border-slate-200 rounded-lg bg-slate-50 focus:bg-white focus:outline-none focus:ring-2 focus:ring-arc-accent/20 focus:border-arc-accent w-44"
-              />
+          <div className="flex flex-wrap items-center gap-4">
+            <div>
+              <h2 className="text-sm font-bold text-slate-900">
+                {bottomView === "patterns"
+                  ? `Identified Patterns for ${nodeName}`
+                  : `CSV Readings for ${nodeName}`}
+              </h2>
+              <p className="text-xs text-slate-500 font-mono tabular-nums mt-0.5">
+                {bottomView === "patterns"
+                  ? `${patterns.length} ${patterns.length === 1 ? "pattern" : "patterns"} · Rename, focus on chart, or scan across datasets`
+                  : `${points.length.toLocaleString()} rows · Time | RAW ADC | DC V | Impedance (${unit})`}
+              </p>
             </div>
 
-            {/* Source filter segmented buttons */}
             <div className="flex items-center gap-0.5 p-1 bg-slate-100 rounded-lg border border-slate-200">
-              {(
-                [
-                  { id: "all", label: "All" },
-                  { id: "auto", label: "Auto" },
-                  { id: "manual", label: "Manual" },
-                ] as const
-              ).map((tab) => (
-                <button
-                  key={tab.id}
-                  type="button"
-                  onClick={() => setSourceFilter(tab.id)}
-                  className={clsx(
-                    "px-2.5 py-1 text-xs font-medium rounded-md transition-colors whitespace-nowrap shrink-0",
-                    sourceFilter === tab.id
-                      ? "bg-white text-slate-900 shadow-sm font-semibold"
-                      : "text-slate-600 hover:text-slate-900"
-                  )}
-                >
-                  {tab.label}
-                </button>
-              ))}
+              <button
+                type="button"
+                onClick={() => setBottomView("patterns")}
+                className={clsx(
+                  "px-2.5 py-1 text-xs font-medium rounded-md transition-colors whitespace-nowrap shrink-0",
+                  bottomView === "patterns"
+                    ? "bg-white text-slate-900 shadow-sm font-semibold"
+                    : "text-slate-600 hover:text-slate-900"
+                )}
+              >
+                Patterns ({patterns.length})
+              </button>
+              <button
+                type="button"
+                onClick={() => setBottomView("csv")}
+                className={clsx(
+                  "px-2.5 py-1 text-xs font-medium rounded-md transition-colors whitespace-nowrap shrink-0",
+                  bottomView === "csv"
+                    ? "bg-white text-slate-900 shadow-sm font-semibold"
+                    : "text-slate-600 hover:text-slate-900"
+                )}
+              >
+                CSV Log ({points.length})
+              </button>
             </div>
           </div>
+
+          {bottomView === "patterns" && (
+            <div className="flex flex-wrap items-center gap-2">
+              <div className="relative">
+                <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+                <input
+                  type="text"
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  placeholder="Filter patterns..."
+                  className="pl-8 pr-3 py-1.5 text-xs border border-slate-200 rounded-lg bg-slate-50 focus:bg-white focus:outline-none focus:ring-2 focus:ring-arc-accent/20 focus:border-arc-accent w-44"
+                />
+              </div>
+
+              <div className="flex items-center gap-0.5 p-1 bg-slate-100 rounded-lg border border-slate-200">
+                {(
+                  [
+                    { id: "all", label: "All" },
+                    { id: "auto", label: "Auto" },
+                    { id: "manual", label: "Manual" },
+                  ] as const
+                ).map((tab) => (
+                  <button
+                    key={tab.id}
+                    type="button"
+                    onClick={() => setSourceFilter(tab.id)}
+                    className={clsx(
+                      "px-2.5 py-1 text-xs font-medium rounded-md transition-colors whitespace-nowrap shrink-0",
+                      sourceFilter === tab.id
+                        ? "bg-white text-slate-900 shadow-sm font-semibold"
+                        : "text-slate-600 hover:text-slate-900"
+                    )}
+                  >
+                    {tab.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
 
-        {visiblePatterns.length === 0 ? (
+        {bottomView === "csv" ? (
+          points.length === 0 ? (
+            <div className="px-5 py-10 text-center text-xs text-slate-500">
+              No CSV rows loaded for this node.
+            </div>
+          ) : (
+            <div className="max-h-80 overflow-y-auto">
+              <table className="w-full text-left border-collapse text-xs font-mono tabular-nums">
+                <thead className="sticky top-0 bg-slate-50 border-b border-slate-200 text-slate-600 font-sans font-semibold">
+                  <tr>
+                    <th className="px-5 py-2.5">Time</th>
+                    <th className="px-5 py-2.5 text-right">RAW ADC</th>
+                    <th className="px-5 py-2.5 text-right">DC V</th>
+                    <th className="px-5 py-2.5 text-right">Impedance ({unit})</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {points.slice(0, 500).map((pt) => (
+                    <tr key={pt.ts} className="hover:bg-slate-50/80">
+                      <td className="px-5 py-2 text-slate-700">
+                        {format(new Date(pt.ts * 1000), "yyyy-MM-dd HH:mm:ss")}
+                      </td>
+                      <td className="px-5 py-2 text-right text-violet-700 font-medium">
+                        {pt.rawAdc !== undefined ? pt.rawAdc.toFixed(1) : "—"}
+                      </td>
+                      <td className="px-5 py-2 text-right text-arc-accent font-medium">
+                        {pt.dcV !== undefined ? `${pt.dcV.toFixed(3)} V` : "—"}
+                      </td>
+                      <td className="px-5 py-2 text-right text-arc-accent2 font-semibold">
+                        {pt.value.toFixed(2)} {unit}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              {points.length > 500 && (
+                <div className="px-5 py-2.5 text-xs text-slate-500 bg-slate-50 border-t border-slate-200">
+                  Showing first 500 of {points.length.toLocaleString()} rows.
+                </div>
+              )}
+            </div>
+          )
+        ) : visiblePatterns.length === 0 ? (
           <div className="px-5 py-10 text-center space-y-1.5">
             <p className="text-sm font-medium text-slate-700">
               {patterns.length === 0
@@ -297,7 +392,6 @@ export default function PatternList({
                     isFocused ? "bg-blue-50/40" : "hover:bg-slate-50/80"
                   )}
                 >
-                  {/* Left: Name + Type + Note */}
                   <div className="min-w-0 flex-1 space-y-1">
                     <div className="flex flex-wrap items-center gap-2.5">
                       {isEditing ? (
@@ -358,13 +452,11 @@ export default function PatternList({
                     <p className="text-xs text-slate-500">{pat.summaryNote}</p>
                   </div>
 
-                  {/* Middle: Detailed tabular metrics */}
-                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-x-6 gap-y-2 text-xs font-mono tabular-nums flex-shrink-0">
+                  <div className="grid grid-cols-2 sm:grid-cols-5 gap-x-5 gap-y-2 text-xs font-mono tabular-nums flex-shrink-0">
                     <div>
                       <div className="text-[11px] font-sans text-slate-400">Time Window</div>
                       <div className="text-slate-800 font-medium">
-                        {format(new Date(pat.startTs * 1000), "MMM d HH:mm")} &rarr;{" "}
-                        {format(new Date(pat.endTs * 1000), "MMM d HH:mm")}
+                        {formatWindowRange(pat.startTs, pat.endTs)}
                       </div>
                     </div>
                     <div>
@@ -374,13 +466,20 @@ export default function PatternList({
                       </div>
                     </div>
                     <div>
-                      <div className="text-[11px] font-sans text-slate-400">Range / Avg |Z|</div>
+                      <div className="text-[11px] font-sans text-slate-400">RAW ADC / DC V</div>
                       <div className="text-slate-800 font-medium">
-                        {pat.minZ.toFixed(0)}–{pat.maxZ.toFixed(0)} Ω ({pat.avgZ.toFixed(1)})
+                        {pat.avgRawAdc !== undefined ? pat.avgRawAdc.toFixed(1) : "—"} ·{" "}
+                        {pat.avgDcV !== undefined ? `${pat.avgDcV.toFixed(3)}V` : "—"}
                       </div>
                     </div>
                     <div>
-                      <div className="text-[11px] font-sans text-slate-400">Net Shift Δ|Z|</div>
+                      <div className="text-[11px] font-sans text-slate-400">Impedance ({unit})</div>
+                      <div className="text-slate-800 font-medium">
+                        {pat.minZ.toFixed(2)}–{pat.maxZ.toFixed(2)} ({pat.avgZ.toFixed(2)})
+                      </div>
+                    </div>
+                    <div>
+                      <div className="text-[11px] font-sans text-slate-400">Net Shift Δ</div>
                       <div
                         className={clsx(
                           "font-semibold",
@@ -388,13 +487,12 @@ export default function PatternList({
                         )}
                       >
                         {pat.deltaZ >= 0 ? "+" : ""}
-                        {pat.deltaZ.toFixed(1)} Ω ({pat.deltaPct >= 0 ? "+" : ""}
+                        {pat.deltaZ.toFixed(2)} {unit} ({pat.deltaPct >= 0 ? "+" : ""}
                         {pat.deltaPct.toFixed(1)}%)
                       </div>
                     </div>
                   </div>
 
-                  {/* Right: Actions */}
                   <div className="flex items-center gap-1.5 flex-shrink-0">
                     <button
                       type="button"
