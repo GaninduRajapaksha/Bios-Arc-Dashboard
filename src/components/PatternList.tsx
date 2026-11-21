@@ -1,12 +1,13 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { format } from "date-fns";
 import clsx from "clsx";
 import {
   Activity,
   ArrowDownRight,
   ArrowUpRight,
+  BookmarkPlus,
   Check,
   Crosshair,
   GitCompareArrows,
@@ -21,22 +22,30 @@ import type { CsvTelemetryPoint, ImpedanceUnit } from "@/lib/csvParser";
 import type {
   IdentifiedPattern,
   PatternCategory,
+  ReferenceMatchResult,
+  ReferencePattern,
   SimilarityMatch,
 } from "@/lib/patternEngine";
 
 interface PatternListProps {
   nodeName: string;
+  treeTypeName?: string;
+  nextRefCode?: string;
   unit: ImpedanceUnit;
   points: CsvTelemetryPoint[];
   patterns: IdentifiedPattern[];
+  references: ReferencePattern[];
+  referenceMatches: ReferenceMatchResult[];
   activeFocusLabel: string | null;
   similaritySourcePattern: IdentifiedPattern | null;
   similarityMatches: SimilarityMatch[];
   minSimilarity: number;
   onChangeMinSimilarity: (val: number) => void;
   onFocusPattern: (pattern: IdentifiedPattern) => void;
+  onFocusReferenceMatch: (match: ReferenceMatchResult) => void;
   onRenamePattern: (patternId: string, newName: string) => void;
   onDeletePattern: (patternId: string) => void;
+  onPinPatternAsReference: (pattern: IdentifiedPattern) => void;
   onFindSimilar: (pattern: IdentifiedPattern) => void;
   onCloseSimilarity: () => void;
   onJumpToMatch: (match: SimilarityMatch) => void;
@@ -76,26 +85,50 @@ function formatWindowRange(startTs: number, endTs: number): string {
 
 export default function PatternList({
   nodeName,
+  treeTypeName,
+  nextRefCode = "D1",
   unit,
   points,
   patterns,
+  references,
+  referenceMatches,
   activeFocusLabel,
   similaritySourcePattern,
   similarityMatches,
   minSimilarity,
   onChangeMinSimilarity,
   onFocusPattern,
+  onFocusReferenceMatch,
   onRenamePattern,
   onDeletePattern,
+  onPinPatternAsReference,
   onFindSimilar,
   onCloseSimilarity,
   onJumpToMatch,
 }: PatternListProps) {
-  const [bottomView, setBottomView] = useState<"patterns" | "csv">("patterns");
+  const [bottomView, setBottomView] = useState<"references" | "patterns" | "csv">(
+    references.length > 0 ? "references" : "patterns"
+  );
+  const [refFilterId, setRefFilterId] = useState<string>("all");
+  const [refSort, setRefSort] = useState<"score" | "time">("score");
+
   const [sourceFilter, setSourceFilter] = useState<"all" | "auto" | "manual">("all");
   const [searchQuery, setSearchQuery] = useState("");
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editingName, setEditingName] = useState("");
+
+  useEffect(() => {
+    setRefFilterId("all");
+  }, [treeTypeName]);
+
+  const visibleRefMatches = useMemo(() => {
+    const filtered = referenceMatches.filter((m) =>
+      refFilterId === "all" ? true : m.referenceId === refFilterId
+    );
+    return [...filtered].sort((a, b) =>
+      refSort === "score" ? b.overallScore - a.overallScore : a.startTs - b.startTs
+    );
+  }, [referenceMatches, refFilterId, refSort]);
 
   const visiblePatterns = useMemo(() => {
     return patterns.filter((p) => {
@@ -238,24 +271,40 @@ export default function PatternList({
         </section>
       )}
 
-      {/* ── Identified Patterns + Raw Logger Data Table (Under Chart) ── */}
+      {/* ── Under-Chart Inspection Panel: Reference Matches | Identified Patterns | CSV Log ── */}
       <section className="bg-white rounded-xl border border-slate-200 overflow-hidden">
         <div className="px-5 py-3.5 border-b border-slate-200 flex flex-wrap items-center justify-between gap-3">
           <div className="flex flex-wrap items-center gap-4">
             <div>
               <h2 className="text-sm font-bold text-slate-900">
-                {bottomView === "patterns"
+                {bottomView === "references"
+                  ? `${treeTypeName ?? "Tree Type"} Reference Matches for ${nodeName}`
+                  : bottomView === "patterns"
                   ? `Identified Patterns for ${nodeName}`
                   : `CSV Readings for ${nodeName}`}
               </h2>
               <p className="text-xs text-slate-500 font-mono tabular-nums mt-0.5">
-                {bottomView === "patterns"
-                  ? `${patterns.length} ${patterns.length === 1 ? "pattern" : "patterns"} · Rename, focus on chart, or scan across datasets`
+                {bottomView === "references"
+                  ? `${referenceMatches.length} matched windows · Scored by Impedance shape + Δ DC V + Δ RAW ADC`
+                  : bottomView === "patterns"
+                  ? `${patterns.length} ${patterns.length === 1 ? "pattern" : "patterns"} · Rename, pin as reference, or scan across datasets`
                   : `${points.length.toLocaleString()} rows · Time | RAW ADC | DC V | Impedance (${unit})`}
               </p>
             </div>
 
             <div className="flex items-center gap-0.5 p-1 bg-slate-100 rounded-lg border border-slate-200">
+              <button
+                type="button"
+                onClick={() => setBottomView("references")}
+                className={clsx(
+                  "px-2.5 py-1 text-xs font-medium rounded-md transition-colors whitespace-nowrap shrink-0",
+                  bottomView === "references"
+                    ? "bg-white text-slate-900 shadow-sm font-semibold"
+                    : "text-slate-600 hover:text-slate-900"
+                )}
+              >
+                Reference Matches ({referenceMatches.length})
+              </button>
               <button
                 type="button"
                 onClick={() => setBottomView("patterns")}
@@ -266,7 +315,7 @@ export default function PatternList({
                     : "text-slate-600 hover:text-slate-900"
                 )}
               >
-                Patterns ({patterns.length})
+                Identified Patterns ({patterns.length})
               </button>
               <button
                 type="button"
@@ -282,6 +331,50 @@ export default function PatternList({
               </button>
             </div>
           </div>
+
+          {bottomView === "references" && references.length > 0 && (
+            <div className="flex flex-wrap items-center gap-2">
+              <select
+                value={refFilterId}
+                onChange={(e) => setRefFilterId(e.target.value)}
+                className="px-2.5 py-1.5 text-xs border border-slate-200 rounded-lg bg-slate-50 font-medium text-slate-700"
+              >
+                <option value="all">All References ({references.length})</option>
+                {references.map((r) => (
+                  <option key={r.id} value={r.id}>
+                    {r.code} · {r.qualityName}
+                  </option>
+                ))}
+              </select>
+
+              <div className="flex items-center gap-0.5 p-1 bg-slate-100 rounded-lg border border-slate-200">
+                <button
+                  type="button"
+                  onClick={() => setRefSort("score")}
+                  className={clsx(
+                    "px-2.5 py-1 text-xs font-medium rounded-md whitespace-nowrap",
+                    refSort === "score"
+                      ? "bg-white text-slate-900 shadow-sm font-semibold"
+                      : "text-slate-600"
+                  )}
+                >
+                  Best Match %
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setRefSort("time")}
+                  className={clsx(
+                    "px-2.5 py-1 text-xs font-medium rounded-md whitespace-nowrap",
+                    refSort === "time"
+                      ? "bg-white text-slate-900 shadow-sm font-semibold"
+                      : "text-slate-600"
+                  )}
+                >
+                  Chronological
+                </button>
+              </div>
+            </div>
+          )}
 
           {bottomView === "patterns" && (
             <div className="flex flex-wrap items-center gap-2">
@@ -323,7 +416,140 @@ export default function PatternList({
           )}
         </div>
 
-        {bottomView === "csv" ? (
+        {/* Tab 1: Reference Matches */}
+        {bottomView === "references" ? (
+          references.length === 0 ? (
+            <div className="px-5 py-10 text-center space-y-1.5">
+              <p className="text-sm font-medium text-slate-700">
+                No reference signatures defined for {treeTypeName ?? "this Tree Type"}
+              </p>
+              <p className="text-xs text-slate-500">
+                Open the Reference Library or use &ldquo;Select Pattern&rdquo; above the chart to add D1–Dn references.
+              </p>
+            </div>
+          ) : visibleRefMatches.length === 0 ? (
+            <div className="px-5 py-10 text-center space-y-1.5">
+              <p className="text-sm font-medium text-slate-700">
+                No segments matched the current reference filter or similarity threshold
+              </p>
+              <p className="text-xs text-slate-500">
+                Try lowering the threshold to 60% in the Reference Similarity Summary strip above or switching filter to All References.
+              </p>
+            </div>
+          ) : (
+            <div className="divide-y divide-slate-100">
+              {visibleRefMatches.map((m) => {
+                const focusTag = `${m.referenceCode} · ${m.qualityName}`;
+                const isFocused = activeFocusLabel?.startsWith(focusTag);
+
+                return (
+                  <div
+                    key={m.id}
+                    className={clsx(
+                      "px-5 py-3.5 transition-colors flex flex-col xl:flex-row xl:items-center justify-between gap-4",
+                      isFocused ? "bg-blue-50/40" : "hover:bg-slate-50/80"
+                    )}
+                  >
+                    <div className="min-w-0 flex-1 space-y-1">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span
+                          className="w-2.5 h-2.5 rounded-full flex-shrink-0"
+                          style={{ backgroundColor: m.color }}
+                        />
+                        <span
+                          className="text-xs font-mono font-bold"
+                          style={{ color: m.color }}
+                        >
+                          {m.referenceCode}
+                        </span>
+                        <span className="text-slate-300" aria-hidden="true">
+                          ·
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => onFocusReferenceMatch(m)}
+                          className="text-sm font-bold text-slate-900 hover:text-arc-accent2 text-left"
+                        >
+                          {m.qualityName}
+                        </button>
+                        <span className="text-slate-300" aria-hidden="true">
+                          ·
+                        </span>
+                        <span className="text-xs font-mono text-slate-500 tabular-nums">
+                          {formatWindowRange(m.startTs, m.endTs)} ({formatDuration(m.startTs, m.endTs)} ·{" "}
+                          {m.sampleCount} pts)
+                        </span>
+                      </div>
+
+                      <div className="text-xs font-mono tabular-nums text-slate-500">
+                        Ref baseline: ΔZ {m.refDeltaZ >= 0 ? "+" : ""}
+                        {m.refDeltaZ.toFixed(2)} {unit}
+                        {m.refDeltaDcV !== undefined
+                          ? ` · ΔDC V ${m.refDeltaDcV >= 0 ? "+" : ""}${m.refDeltaDcV.toFixed(3)}V`
+                          : ""}
+                        {m.refDeltaRawAdc !== undefined
+                          ? ` · ΔADC ${m.refDeltaRawAdc >= 0 ? "+" : ""}${m.refDeltaRawAdc.toFixed(1)}`
+                          : ""}
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-x-5 gap-y-2 text-xs font-mono tabular-nums flex-shrink-0">
+                      <div>
+                        <div className="text-[11px] font-sans text-slate-400">Impedance Shape</div>
+                        <div className="font-semibold text-arc-accent2">
+                          {m.impedanceScore.toFixed(1)}%{" "}
+                          <span className="text-slate-500 font-normal">
+                            ({m.deltaZ >= 0 ? "+" : ""}
+                            {m.deltaZ.toFixed(2)} {unit})
+                          </span>
+                        </div>
+                      </div>
+                      <div>
+                        <div className="text-[11px] font-sans text-slate-400">DC V Change</div>
+                        <div className="font-semibold text-arc-accent">
+                          {m.dcVScore !== null ? `${m.dcVScore.toFixed(1)}%` : "—"}{" "}
+                          <span className="text-slate-500 font-normal">
+                            {m.deltaDcV !== undefined
+                              ? `(${m.deltaDcV >= 0 ? "+" : ""}${m.deltaDcV.toFixed(3)}V)`
+                              : ""}
+                          </span>
+                        </div>
+                      </div>
+                      <div>
+                        <div className="text-[11px] font-sans text-slate-400">RAW ADC Change</div>
+                        <div className="font-semibold text-violet-700">
+                          {m.rawAdcScore !== null ? `${m.rawAdcScore.toFixed(1)}%` : "—"}{" "}
+                          <span className="text-slate-500 font-normal">
+                            {m.deltaRawAdc !== undefined
+                              ? `(${m.deltaRawAdc >= 0 ? "+" : ""}${m.deltaRawAdc.toFixed(1)})`
+                              : ""}
+                          </span>
+                        </div>
+                      </div>
+                      <div>
+                        <div className="text-[11px] font-sans text-slate-400">Overall Match</div>
+                        <div className="text-sm font-bold text-slate-900">
+                          {m.overallScore.toFixed(1)}%
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="flex items-center flex-shrink-0">
+                      <button
+                        type="button"
+                        onClick={() => onFocusReferenceMatch(m)}
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-arc-accent hover:bg-arc-accentHover text-white text-xs font-semibold whitespace-nowrap shrink-0"
+                      >
+                        <Crosshair className="w-3.5 h-3.5" />
+                        Inspect on Chart
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )
+        ) : bottomView === "csv" ? (
           points.length === 0 ? (
             <div className="px-5 py-10 text-center text-xs text-slate-500">
               No CSV rows loaded for this node.
@@ -493,7 +719,7 @@ export default function PatternList({
                     </div>
                   </div>
 
-                  <div className="flex items-center gap-1.5 flex-shrink-0">
+                  <div className="flex flex-wrap items-center gap-1.5 flex-shrink-0">
                     <button
                       type="button"
                       onClick={() => onFocusPattern(pat)}
@@ -509,6 +735,15 @@ export default function PatternList({
                     >
                       <Pencil className="w-3.5 h-3.5" />
                       Rename
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => onPinPatternAsReference(pat)}
+                      title={`Save as ${nextRefCode} Reference under ${treeTypeName ?? "Tree Type"}`}
+                      className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-emerald-200 bg-emerald-50/50 text-xs font-semibold text-emerald-800 hover:bg-emerald-100/70 whitespace-nowrap shrink-0"
+                    >
+                      <BookmarkPlus className="w-3.5 h-3.5" />
+                      Pin as {nextRefCode}
                     </button>
                     <button
                       type="button"

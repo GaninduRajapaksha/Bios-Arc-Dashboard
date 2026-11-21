@@ -22,6 +22,7 @@ import {
 import { format } from "date-fns";
 import clsx from "clsx";
 import {
+  BookmarkPlus,
   Check,
   Maximize2,
   MousePointerClick,
@@ -30,8 +31,14 @@ import {
   X,
 } from "lucide-react";
 import type { CsvTelemetryPoint, ImpedanceUnit } from "@/lib/csvParser";
-import type { IdentifiedPattern } from "@/lib/patternEngine";
-import { computePatternFromWindow } from "@/lib/patternEngine";
+import type {
+  IdentifiedPattern,
+  ReferenceMatchResult,
+} from "@/lib/patternEngine";
+import {
+  computePatternFromWindow,
+  computeWindowChannelDeltas,
+} from "@/lib/patternEngine";
 
 export type ChartTimeRange = "15M" | "1H" | "24H" | "7D" | "30D" | "ALL" | "custom";
 export type ChartChannel = "impedance" | "dcV" | "rawAdc";
@@ -56,15 +63,24 @@ interface ImpedanceChartProps {
   nodeId: string;
   nodeName: string;
   treeName: string;
+  activeTreeTypeName?: string;
+  nextRefCode?: string;
   location: string;
   csvFileName: string;
+  csvFiles?: string[];
   intervalLabel: string;
   unit: ImpedanceUnit;
   points: CsvTelemetryPoint[];
   patterns: IdentifiedPattern[];
+  referenceMatches?: ReferenceMatchResult[];
   focusedWindow: FocusedChartWindow | null;
   onClearFocus: () => void;
   onSaveManualPattern: (pattern: IdentifiedPattern) => void;
+  onSaveSelectionAsReference?: (params: {
+    startTs: number;
+    endTs: number;
+    qualityName: string;
+  }) => void;
   onAutoScanPatterns: () => void;
   onOpenCsvModal: () => void;
 }
@@ -110,15 +126,20 @@ export default function ImpedanceChart({
   nodeId,
   nodeName,
   treeName,
+  activeTreeTypeName,
+  nextRefCode = "D1",
   location,
   csvFileName,
+  csvFiles,
   intervalLabel,
   unit,
   points,
   patterns,
+  referenceMatches = [],
   focusedWindow,
   onClearFocus,
   onSaveManualPattern,
+  onSaveSelectionAsReference,
   onAutoScanPatterns,
   onOpenCsvModal,
 }: ImpedanceChartProps) {
@@ -380,6 +401,20 @@ export default function ImpedanceChart({
     const maxTs = filteredPoints[filteredPoints.length - 1].ts;
     const markers: SeriesMarker<Time>[] = [];
 
+    for (const m of referenceMatches) {
+      if (m.endTs < minTs || m.startTs > maxTs) continue;
+      const anchorTs =
+        filteredPoints.find((p) => p.ts >= m.startTs && p.ts <= m.endTs)?.ts ??
+        m.startTs;
+      markers.push({
+        time: anchorTs as UTCTimestamp,
+        position: "aboveBar",
+        color: m.color,
+        shape: "circle",
+        text: `${m.referenceCode} ${Math.round(m.overallScore)}%`,
+      });
+    }
+
     for (const pat of patterns) {
       if (pat.endTs < minTs || pat.startTs > maxTs) continue;
       const anchorTs =
@@ -454,7 +489,7 @@ export default function ImpedanceChart({
     if (!focusedWindow) {
       chartRef.current?.timeScale().fitContent();
     }
-  }, [filteredPoints, channel, patterns, focusedWindow, pickStartTs, pickEndTs]);
+  }, [filteredPoints, channel, patterns, referenceMatches, focusedWindow, pickStartTs, pickEndTs]);
 
   useEffect(() => {
     if (!focusedWindow || !chartRef.current || points.length === 0) return;
@@ -516,6 +551,14 @@ export default function ImpedanceChart({
     });
   }, [nodeId, points, pickStartTs, pickEndTs, draftPatternName, unit]);
 
+  const draftChannelDeltas = useMemo(() => {
+    if (!draftPatternPreview) return null;
+    const slice = points.filter(
+      (p) => p.ts >= draftPatternPreview.startTs && p.ts <= draftPatternPreview.endTs
+    );
+    return computeWindowChannelDeltas(slice);
+  }, [draftPatternPreview, points]);
+
   const handleConfirmManualPattern = () => {
     if (!draftPatternPreview) return;
     const finalName =
@@ -524,6 +567,22 @@ export default function ImpedanceChart({
     onSaveManualPattern({
       ...draftPatternPreview,
       name: finalName,
+    });
+    setSelectionMode(false);
+    setPickStartTs(null);
+    setPickEndTs(null);
+    setDraftPatternName("");
+  };
+
+  const handleConfirmPinReference = () => {
+    if (!draftPatternPreview || !onSaveSelectionAsReference) return;
+    const qualityName =
+      draftPatternName.trim() ||
+      `Custom Quality (${format(new Date(draftPatternPreview.startTs * 1000), "HH:mm")})`;
+    onSaveSelectionAsReference({
+      startTs: draftPatternPreview.startTs,
+      endTs: draftPatternPreview.endTs,
+      qualityName,
     });
     setSelectionMode(false);
     setPickStartTs(null);
@@ -547,7 +606,10 @@ export default function ImpedanceChart({
                 {nodeName}
               </h1>
               <span className="text-xs font-mono text-slate-500 tabular-nums">
-                {csvFileName || "No CSV"} · {intervalLabel} · {points.length.toLocaleString()} pts
+                {csvFiles && csvFiles.length > 1
+                  ? `${csvFiles.length} CSV files`
+                  : csvFileName || "No CSV"}{" "}
+                · {intervalLabel} · {points.length.toLocaleString()} pts
               </span>
             </div>
           </div>
@@ -677,7 +739,7 @@ export default function ImpedanceChart({
             className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border border-slate-200 bg-white text-slate-700 hover:border-slate-300 hover:bg-slate-50 transition-colors whitespace-nowrap shrink-0"
           >
             <Upload className="w-3.5 h-3.5" />
-            CSV
+            Add CSV
           </button>
 
           <button
@@ -733,22 +795,26 @@ export default function ImpedanceChart({
             )}
             {draftPatternPreview && (
               <span className="font-mono tabular-nums">
-                Selected {draftPatternPreview.sampleCount} pts ·{" "}
-                {format(new Date(draftPatternPreview.startTs * 1000), "HH:mm:ss")} →{" "}
-                {format(new Date(draftPatternPreview.endTs * 1000), "HH:mm:ss")} · Δ
+                {draftPatternPreview.sampleCount} pts · ΔZ{" "}
                 {draftPatternPreview.deltaZ >= 0 ? "+" : ""}
                 {draftPatternPreview.deltaZ.toFixed(2)} {unit}
+                {draftChannelDeltas?.deltaDcV !== undefined
+                  ? ` · ΔDC V ${draftChannelDeltas.deltaDcV >= 0 ? "+" : ""}${draftChannelDeltas.deltaDcV.toFixed(3)}V`
+                  : ""}
+                {draftChannelDeltas?.deltaRawAdc !== undefined
+                  ? ` · ΔADC ${draftChannelDeltas.deltaRawAdc >= 0 ? "+" : ""}${draftChannelDeltas.deltaRawAdc.toFixed(1)}`
+                  : ""}
               </span>
             )}
           </div>
 
           {draftPatternPreview && (
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2">
               <input
                 type="text"
                 value={draftPatternName}
                 onChange={(e) => setDraftPatternName(e.target.value)}
-                placeholder="Name this pattern..."
+                placeholder="Pattern or quality name..."
                 className="px-2.5 py-1 text-xs border border-emerald-300 rounded-md bg-white text-slate-900 focus:outline-none focus:ring-2 focus:ring-arc-accent/25 w-48"
                 onKeyDown={(e) => {
                   if (e.key === "Enter") handleConfirmManualPattern();
@@ -757,11 +823,26 @@ export default function ImpedanceChart({
               <button
                 type="button"
                 onClick={handleConfirmManualPattern}
-                className="inline-flex items-center gap-1 px-3 py-1 rounded-md bg-arc-accent hover:bg-arc-accentHover text-white text-xs font-semibold whitespace-nowrap"
+                className="inline-flex items-center gap-1 px-3 py-1 rounded-md bg-arc-accent hover:bg-arc-accentHover text-white text-xs font-semibold whitespace-nowrap shrink-0"
               >
                 <Check className="w-3.5 h-3.5" />
                 Save Pattern
               </button>
+              {onSaveSelectionAsReference && (
+                <button
+                  type="button"
+                  onClick={handleConfirmPinReference}
+                  className="inline-flex items-center gap-1 px-3 py-1 rounded-md border border-emerald-700 bg-white hover:bg-emerald-50 text-emerald-900 text-xs font-semibold whitespace-nowrap shrink-0"
+                  title={
+                    activeTreeTypeName
+                      ? `Pin directly to ${activeTreeTypeName} Reference Library`
+                      : "Pin as Tree Type Reference"
+                  }
+                >
+                  <BookmarkPlus className="w-3.5 h-3.5" />
+                  Save as {nextRefCode} Reference
+                </button>
+              )}
             </div>
           )}
         </div>

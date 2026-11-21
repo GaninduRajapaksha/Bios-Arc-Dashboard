@@ -1,6 +1,7 @@
 "use client";
 
 import {
+  BookMarked,
   ChevronDown,
   ChevronRight,
   Download,
@@ -14,11 +15,13 @@ import {
   X,
 } from "lucide-react";
 import clsx from "clsx";
-import type { SensorNode, TreeGroup } from "@/lib/biosarcStore";
+import type { SensorNode, TreeGroup, TreeType } from "@/lib/biosarcStore";
 
 interface TreeSidebarProps {
   trees: TreeGroup[];
+  treeTypes: TreeType[];
   nodes: SensorNode[];
+  referenceCount: number;
   activeNodeId: string | null;
   mobileOpen: boolean;
   onCloseMobile: () => void;
@@ -30,13 +33,16 @@ interface TreeSidebarProps {
   onOpenNewNode: (treeId: string) => void;
   onOpenEditNode: (node: SensorNode) => void;
   onDeleteNode: (nodeId: string) => void;
+  onOpenReferenceLibrary: (treeTypeId?: string) => void;
   onDownloadSampleCsv: () => void;
   onResetSampleData: () => void;
 }
 
 export default function TreeSidebar({
   trees,
+  treeTypes,
   nodes,
+  referenceCount,
   activeNodeId,
   mobileOpen,
   onCloseMobile,
@@ -48,9 +54,12 @@ export default function TreeSidebar({
   onOpenNewNode,
   onOpenEditNode,
   onDeleteNode,
+  onOpenReferenceLibrary,
   onDownloadSampleCsv,
   onResetSampleData,
 }: TreeSidebarProps) {
+  const treeTypeMap = new Map(treeTypes.map((t) => [t.id, t.name]));
+
   const sidebarBody = (
     <div className="flex flex-col h-full bg-arc-sidebar text-slate-100 select-none">
       {/* Brand header */}
@@ -73,8 +82,28 @@ export default function TreeSidebar({
         </button>
       </div>
 
+      {/* Reference Library launcher */}
+      <div className="px-3 pt-3 pb-1 flex-shrink-0">
+        <button
+          type="button"
+          onClick={() => {
+            onOpenReferenceLibrary();
+            onCloseMobile();
+          }}
+          className="w-full flex items-center justify-between gap-2 px-3 py-2 rounded-lg bg-slate-900/70 hover:bg-arc-sidebarHover border border-slate-800 text-xs font-semibold text-slate-100 transition-colors"
+        >
+          <span className="inline-flex items-center gap-2">
+            <BookMarked className="w-4 h-4 text-emerald-400 flex-shrink-0" />
+            Reference Library
+          </span>
+          <span className="font-mono text-[11px] text-emerald-300 tabular-nums">
+            {treeTypes.length} types · {referenceCount} refs
+          </span>
+        </button>
+      </div>
+
       {/* Tree inventory header */}
-      <div className="px-4 pt-4 pb-2 flex items-center justify-between gap-2 flex-shrink-0">
+      <div className="px-4 pt-3 pb-2 flex items-center justify-between gap-2 flex-shrink-0">
         <span className="text-xs font-semibold text-slate-400 tracking-wide">
           Trees &amp; Nodes
         </span>
@@ -108,6 +137,7 @@ export default function TreeSidebar({
           trees.map((tree) => {
             const treeNodes = nodes.filter((n) => n.treeId === tree.id);
             const totalSamples = treeNodes.reduce((acc, n) => acc + n.points.length, 0);
+            const typeName = treeTypeMap.get(tree.treeTypeId) ?? "Unassigned";
 
             return (
               <div
@@ -132,7 +162,7 @@ export default function TreeSidebar({
                         {tree.name}
                       </div>
                       <div className="text-[11px] text-slate-400 font-mono tabular-nums truncate">
-                        {treeNodes.length} {treeNodes.length === 1 ? "node" : "nodes"} · {totalSamples.toLocaleString()} pts
+                        {typeName} · {treeNodes.length} {treeNodes.length === 1 ? "node" : "nodes"} · {totalSamples.toLocaleString()} pts
                       </div>
                     </div>
                   </button>

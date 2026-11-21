@@ -304,7 +304,7 @@ function parseImpedanceWithUnit(
   return num;
 }
 
-function inferIntervalLabel(points: CsvTelemetryPoint[]): string {
+export function inferIntervalLabel(points: CsvTelemetryPoint[]): string {
   if (points.length < 2) return "Single sample";
   const diffs: number[] = [];
   for (let i = 1; i < Math.min(points.length, 60); i++) {
@@ -321,6 +321,20 @@ function inferIntervalLabel(points: CsvTelemetryPoint[]): string {
     return Number.isInteger(hours) ? `${hours}h interval` : `${hours.toFixed(1)}h interval`;
   }
   return `${(hours / 24).toFixed(1)}d interval`;
+}
+
+export function mergeTelemetryPoints(
+  existing: CsvTelemetryPoint[],
+  incoming: CsvTelemetryPoint[]
+): CsvTelemetryPoint[] {
+  const byTs = new Map<number, CsvTelemetryPoint>();
+  for (const pt of existing) {
+    byTs.set(pt.ts, pt);
+  }
+  for (const pt of incoming) {
+    byTs.set(pt.ts, pt);
+  }
+  return Array.from(byTs.values()).sort((a, b) => a.ts - b.ts);
 }
 
 export function buildPointsFromCsv(
